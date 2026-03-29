@@ -2,11 +2,11 @@ import numpy as np
 
 from pyclad.metrics.continual.concepts_metric import (
     ConceptLevelMatrix,
-    PerLearnedConceptMetric,
+    StepwiseConceptMetric,
 )
 
 
-class ForgettingMeasurePerTask(PerLearnedConceptMetric):
+class ForgettingMeasure(StepwiseConceptMetric):
     """Forgetting Measure (FM) measures the average performance drop due to forgetting in continual learning.
 
     For each (learned_concept, evaluated_concept) pair, computes the difference between the best previously

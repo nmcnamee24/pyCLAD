@@ -54,7 +54,7 @@ if __name__ == "__main__":
 
     time_callback = TimeEvaluationCallback()
     metric_callback = ConceptMetricCallback(
-        base_metric=RocAuc(), metrics=[ContinualAverage(), BackwardTransfer(), ForwardTransfer()]
+        base_metric=RocAuc(), summarized_metrics=[ContinualAverage(), BackwardTransfer(), ForwardTransfer()]
     )
     memory_callback = MemoryUsageCallback()
 

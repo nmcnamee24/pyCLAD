@@ -11,6 +11,7 @@ from pyclad.data.datasets.concepts_dataset import ConceptsDataset
 from pyclad.metrics.base.roc_auc import RocAuc
 from pyclad.metrics.continual.average_continual import ContinualAverage
 from pyclad.metrics.continual.backward_transfer import BackwardTransfer
+from pyclad.metrics.continual.forgetting_measure import ForgettingMeasure
 from pyclad.metrics.continual.forward_transfer import ForwardTransfer
 from pyclad.models.adapters.pyod_adapters import OneClassSVMAdapter
 from pyclad.output.json_writer import JsonOutputWriter
@@ -48,7 +49,8 @@ if __name__ == "__main__":
 
     time_callback = TimeEvaluationCallback()
     metric_callback = ConceptMetricCallback(
-        base_metric=RocAuc(), metrics=[ContinualAverage(), BackwardTransfer(), ForwardTransfer()]
+        base_metric=RocAuc(), summarized_metrics=[ContinualAverage(), BackwardTransfer(), ForwardTransfer()],
+        stepwise_metrics=[ForgettingMeasure()]
     )
     memory_callback = MemoryUsageCallback()
 

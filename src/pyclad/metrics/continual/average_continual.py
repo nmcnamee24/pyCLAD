@@ -2,11 +2,11 @@ import numpy as np
 
 from pyclad.metrics.continual.concepts_metric import (
     ConceptLevelMatrix,
-    ConceptLevelMetric,
+    SummarizedMetric,
 )
 
 
-class ContinualAverage(ConceptLevelMetric):
+class ContinualAverage(SummarizedMetric):
 
     def compute(self, metric_matrix: ConceptLevelMatrix) -> float:
         concepts_no = len(metric_matrix)

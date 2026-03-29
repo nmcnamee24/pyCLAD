@@ -1,7 +1,7 @@
 import pytest
 
 from pyclad.metrics.continual.concepts_metric import ConceptLevelMatrix
-from pyclad.metrics.continual.forgetting_measure import ForgettingMeasurePerTask
+from pyclad.metrics.continual.forgetting_measure import ForgettingMeasure
 
 parameters = [
     # Simple one concept
@@ -22,16 +22,16 @@ parameters = [
 
 
 def test_empty_matrix():
-    metric = ForgettingMeasurePerTask()
+    metric = ForgettingMeasure()
     assert metric.compute([]) == []
 
 
 def test_name():
-    metric = ForgettingMeasurePerTask()
+    metric = ForgettingMeasure()
     assert metric.name() == "ForgettingMeasure"
 
 
 @pytest.mark.parametrize("matrix,expected_result", parameters)
 def test_metric_calculation(matrix: ConceptLevelMatrix, expected_result: float):
-    metric = ForgettingMeasurePerTask()
+    metric = ForgettingMeasure()
     assert metric.compute(matrix) == pytest.approx(expected_result, rel=1e-9)

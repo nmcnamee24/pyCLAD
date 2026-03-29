@@ -8,17 +8,24 @@ from pyclad.data.concept import Concept
 from pyclad.metrics.base.base_metric import BaseMetric
 from pyclad.metrics.continual.concepts_metric import (
     ConceptLevelMatrix,
-    ConceptLevelMetric,
+    StepwiseConceptMetric,
+    SummarizedMetric,
 )
 from pyclad.output.output_writer import InfoProvider
 
 
 class ConceptMetricCallback(Callback, InfoProvider):
-    def __init__(self, base_metric: BaseMetric, metrics: Iterable[ConceptLevelMetric]):
+    def __init__(
+        self,
+        base_metric: BaseMetric,
+        summarized_metrics: Iterable[SummarizedMetric],
+        stepwise_metrics: Iterable[StepwiseConceptMetric] = None,
+    ):
         self._base_metric: BaseMetric = base_metric
         self._metric_matrix: Dict[str, Dict[str, float]] = defaultdict(dict)
         self._learned_concepts: List[str] = []
-        self._metrics = metrics
+        self._summarized_metrics = summarized_metrics
+        self._stepwise_metrics = stepwise_metrics if stepwise_metrics is not None else []
 
     def after_training(self, learned_concept: Concept):
         self._learned_concepts.append(learned_concept.name)
@@ -40,14 +47,15 @@ class ConceptMetricCallback(Callback, InfoProvider):
         self._metric_matrix[self._learned_concepts[-1]][evaluated_concept.name] = metric_value
 
     def info(self) -> Dict[str, Any]:
-
         concept_level_matrix = self._transform_to_ordered_matrix(self._metric_matrix, self._learned_concepts)
-        lifelong_learning_metrics = {m.name(): m.compute(concept_level_matrix) for m in self._metrics}
+        summarized_metrics = {m.name(): m.compute(concept_level_matrix) for m in self._summarized_metrics}
+        stepwise_metrics = {m.name(): m.compute(concept_level_matrix) for m in self._stepwise_metrics}
 
         return {
             f"concept_metric_callback_{self._base_metric.name()}": {
                 "base_metric_name": self._base_metric.name(),
-                "metrics": lifelong_learning_metrics,
+                "metrics": summarized_metrics,
+                "stepwise_metrics": stepwise_metrics,
                 "concepts_order": self._learned_concepts,
                 "metric_matrix": self._metric_matrix,
             }
