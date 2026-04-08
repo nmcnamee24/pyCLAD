@@ -56,7 +56,7 @@ def plot_metric_heatmap(
         center=0.5,
         cmap=sns.color_palette(color_palette, as_cmap=True),
         annot=annotate,
-        mask=None if ignore_upper_diagonal else _create_upper_diagonal_mask(len(concepts_order)),
+        mask=_create_upper_diagonal_mask(len(concepts_order)) if ignore_upper_diagonal else None,
     )
     p.set_xlabel(xlabel)
     p.set_ylabel(ylabel)
