@@ -1,4 +1,5 @@
 """Learning without Forgetting (LwF) strategy for continual learning."""
+
 import copy
 import logging
 from typing import Dict, Optional
@@ -19,12 +20,12 @@ logger = logging.getLogger(__name__)
 class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
     """
     Learning without Forgetting strategy using knowledge distillation.
-    
+
     Prevents catastrophic forgetting by maintaining a frozen copy of the model
     from the previous task and using it to regularize training on new data.
     The new model learns to both reconstruct new data well AND preserve the
     knowledge encoded in the old model's latent representations.
-    
+
     Parameters
     ----------
     model : Model
@@ -35,27 +36,23 @@ class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
     distill_mode : str, optional
         Type of distillation: 'latent', 'reconstruction', or 'hybrid' (default: 'latent')
     """
-    
-    def __init__(
-        self,
-        model: Model,
-        alpha: float = 0.5,
-        distill_mode: str = 'latent'
-    ):
+
+    def __init__(self, model: Model, alpha: float = 0.5, distill_mode: str = "latent"):
         self._model = model
         self._old_model: Optional[Model] = None
         self._alpha = alpha
         self._distill_mode = distill_mode
         self._task_count = 0
-        
-        if distill_mode not in ['latent', 'reconstruction', 'hybrid']:
-            raise ValueError(f"Invalid distill_mode: {distill_mode}. "
-                           f"Must be 'latent', 'reconstruction', or 'hybrid'")
-    
+
+        if distill_mode not in ["latent", "reconstruction", "hybrid"]:
+            raise ValueError(
+                f"Invalid distill_mode: {distill_mode}. " f"Must be 'latent', 'reconstruction', or 'hybrid'"
+            )
+
     def learn(self, data: np.ndarray, *args, **kwargs) -> None:
         """
         Learn from new data using knowledge distillation if not the first task.
-        
+
         Parameters
         ----------
         data : np.ndarray
@@ -67,35 +64,37 @@ class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
             self._model.fit(data)
         else:
             # Subsequent tasks: train with distillation from old model
-            logger.info(f"Task {self._task_count + 1}: Training with LwF distillation "
-                       f"(alpha={self._alpha}, mode={self._distill_mode})")
+            logger.info(
+                f"Task {self._task_count + 1}: Training with LwF distillation "
+                f"(alpha={self._alpha}, mode={self._distill_mode})"
+            )
             self._fit_with_distillation(data)
-        
+
         self._task_count += 1
-        
+
         # Clone current model as old model for next task
         self._old_model = self._clone_model()
-    
+
     def predict(self, data: np.ndarray, *args, **kwargs) -> tuple:
         """
         Predict anomalies using the current model.
-        
+
         Parameters
         ----------
         data : np.ndarray
             Data to predict on
-            
+
         Returns
         -------
         tuple
             (predicted labels, anomaly scores)
         """
         return self._model.predict(data)
-    
+
     def name(self) -> str:
         """Return strategy name."""
         return "LwF"
-    
+
     def additional_info(self) -> Dict:
         """Return additional strategy information."""
         return {
@@ -103,7 +102,7 @@ class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
             "alpha": self._alpha,
             "distill_mode": self._distill_mode,
             "task_count": self._task_count,
-            "has_old_model": self._old_model is not None
+            "has_old_model": self._old_model is not None,
         }
 
     def _resolve_trainable_module(self, model: Optional[Model] = None) -> Optional[torch.nn.Module]:
@@ -224,7 +223,9 @@ class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
 
         raise TypeError("Model does not expose encoder/encode hooks required for latent distillation.")
 
-    def _forward_with_model(self, model: Model, batch: torch.Tensor) -> tuple[torch.Tensor, Optional[torch.Tensor], None]:
+    def _forward_with_model(
+        self, model: Model, batch: torch.Tensor
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], None]:
         if hasattr(model, "forward_batch"):
             return model.forward_batch(batch, apply_masking=False)
 
@@ -237,7 +238,9 @@ class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
         z = self._encode_with_model(model, batch) if self._supports_latent_distillation(model) else None
         return x_hat, z, None
 
-    def _training_batch_step(self, batch: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None]:
+    def _training_batch_step(
+        self, batch: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None]:
         if hasattr(self._model, "training_batch_step"):
             return self._model.training_batch_step(batch)
 
@@ -256,11 +259,11 @@ class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
             return "reconstruction"
 
         return self._distill_mode
-    
+
     def _clone_model(self) -> Model:
         """
         Create a frozen deep copy of the current model.
-        
+
         Returns
         -------
         Model
@@ -273,13 +276,13 @@ class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
             module.eval()
             for param in module.parameters():
                 param.requires_grad = False
-        
+
         return cloned
-    
+
     def _fit_with_distillation(self, data: np.ndarray) -> None:
         """
         Train the model with knowledge distillation from the old model.
-        
+
         Parameters
         ----------
         data : np.ndarray
@@ -297,12 +300,7 @@ class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
 
         tensor_data = self._prepare_data(data)
         dataset = TensorDataset(tensor_data)
-        dataloader = DataLoader(
-            dataset,
-            batch_size=self._resolve_batch_size(),
-            shuffle=True,
-            num_workers=0
-        )
+        dataloader = DataLoader(dataset, batch_size=self._resolve_batch_size(), shuffle=True, num_workers=0)
 
         distill_mode = self._resolve_distill_mode()
         device = self._resolve_device(self._model)
@@ -321,21 +319,21 @@ class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
             epoch_loss = 0.0
             epoch_rec_loss = 0.0
             epoch_distill_loss = 0.0
-            
+
             for batch_idx, (batch,) in enumerate(dataloader):
                 batch = batch.to(device)
-                
+
                 rec_loss, x_hat_train, z_train, _ = self._training_batch_step(batch)
                 x_hat_new, z_new = x_hat_train, z_train
-                
+
                 with torch.no_grad():
-                    if distill_mode == 'latent':
+                    if distill_mode == "latent":
                         z_old = self._encode_with_model(self._old_model, batch)
                         distill_loss = torch.nn.functional.mse_loss(z_new, z_old)
-                    elif distill_mode == 'reconstruction':
+                    elif distill_mode == "reconstruction":
                         x_hat_old, _, _ = self._forward_with_model(self._old_model, batch)
                         distill_loss = torch.nn.functional.mse_loss(x_hat_new, x_hat_old)
-                    elif distill_mode == 'hybrid':
+                    elif distill_mode == "hybrid":
                         z_old = self._encode_with_model(self._old_model, batch)
                         x_hat_old, _, _ = self._forward_with_model(self._old_model, batch)
                         latent_loss = torch.nn.functional.mse_loss(z_new, z_old)
@@ -343,7 +341,7 @@ class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
                         distill_loss = (latent_loss + recon_loss) / 2
                     else:
                         raise ValueError(f"Invalid distill_mode: {distill_mode}")
-                
+
                 total_loss = rec_loss + self._alpha * distill_loss
 
                 optimizer.zero_grad()
@@ -353,29 +351,30 @@ class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
                 epoch_loss += total_loss.item()
                 epoch_rec_loss += rec_loss.item()
                 epoch_distill_loss += distill_loss.item()
-            
+
             n_batches = len(dataloader)
             avg_loss = epoch_loss / n_batches
             avg_rec = epoch_rec_loss / n_batches
             avg_distill = epoch_distill_loss / n_batches
-            
+
             epochs = self._resolve_epochs()
             if (epoch + 1) % max(1, epochs // 5) == 0:
-                logger.info(f"Epoch {epoch+1}/{epochs}: "
-                          f"Loss={avg_loss:.6f} (Rec={avg_rec:.6f}, Distill={avg_distill:.6f})")
-        
-        if hasattr(self._model, '_auto_threshold') and self._model._auto_threshold:
+                logger.info(
+                    f"Epoch {epoch+1}/{epochs}: " f"Loss={avg_loss:.6f} (Rec={avg_rec:.6f}, Distill={avg_distill:.6f})"
+                )
+
+        if hasattr(self._model, "_auto_threshold") and self._model._auto_threshold:
             self._model._calibrate_threshold(data)
-    
+
     def _prepare_data(self, data: np.ndarray) -> torch.Tensor:
         """
         Prepare numpy data for PyTorch training.
-        
+
         Parameters
         ----------
         data : np.ndarray
             Training data of shape (n_samples, height, width)
-            
+
         Returns
         -------
         torch.Tensor
