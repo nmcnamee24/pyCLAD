@@ -1,4 +1,21 @@
-"""Elastic Weight Consolidation (EWC) strategy for continual learning."""
+"""Elastic Weight Consolidation (EWC) strategy for continual learning.
+
+This implementation keeps a snapshot of model parameters after each learned
+task and estimates a diagonal Fisher Information Matrix from the current task's
+reconstruction loss. During training on later tasks, it adds the standard EWC
+quadratic penalty so parameters that were important for previous tasks are
+discouraged from drifting too far:
+
+    L_total = L_task + lambda * 0.5 * sum(F_i * (theta_i - theta_i^*)^2)
+
+where ``theta_i^*`` is the parameter value stored after an earlier task and
+``F_i`` is the corresponding diagonal Fisher importance estimate.
+
+The strategy is self-contained and does not require the wrapped pyCLAD model to
+implement any EWC-specific hooks. Instead, it resolves the underlying PyTorch
+module, prepares the training data, runs the optimization loop locally, and
+computes Fisher importances directly from gradients of the task loss.
+"""
 
 import logging
 from typing import Dict, Optional
@@ -20,9 +37,21 @@ class EWCStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
     """
     Elastic Weight Consolidation strategy using a diagonal Fisher approximation.
 
-    The strategy is self-contained: it resolves the underlying torch module from
-    the pyCLAD model wrapper, runs the optimization loop locally, and estimates
-    parameter importance from reconstruction-loss gradients.
+    EWC is a regularization-based continual learning method. After each task,
+    the strategy stores:
+
+    1. A copy of the current trainable parameters.
+    2. A diagonal Fisher estimate measuring how sensitive the task loss is to
+       each parameter.
+
+    When a new task arrives, training minimizes the current task loss plus an
+    EWC penalty over all previously stored tasks. In this project, the task
+    loss is derived from the wrapped model's reconstruction objective, and the
+    Fisher estimate is computed from squared gradients averaged over the task
+    data.
+
+    This version currently supports only ``separate`` mode, where
+    one parameter snapshot and one Fisher estimate are kept per task.
 
     Parameters
     ----------
