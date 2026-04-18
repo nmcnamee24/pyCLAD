@@ -11,11 +11,18 @@ from pyclad.models.model import Model
 
 class Autoencoder(Model):
     def __init__(
-        self, encoder: nn.Module, decoder: nn.Module, lr: float = 1e-2, threshold: float = 0.5, epochs: int = 20
+        self,
+        encoder: nn.Module,
+        decoder: nn.Module,
+        lr: float = 1e-2,
+        threshold: float = 0.5,
+        epochs: int = 20,
+        device: str | torch.device = "cpu",
     ):
         self.module = AutoencoderModule(encoder, decoder, lr)
         self.threshold = threshold
         self.epochs = epochs
+        self.device = torch.device(device)
 
     def fit(self, data: np.ndarray):
         dataset = TensorDataset(torch.Tensor(data))
@@ -24,8 +31,10 @@ class Autoencoder(Model):
         trainer.fit(self.module, dataloader)
 
     def predict(self, data: np.ndarray) -> (np.ndarray, np.ndarray):
-        x_hat = self.module(torch.Tensor(data)).detach()
-        rec_error = ((data - x_hat.numpy()) ** 2).mean(axis=1)
+        self.module.to(self.device)
+        with torch.no_grad():
+            x_hat = self.module(torch.tensor(np.array(data, dtype=np.float32, copy=True), device=self.device))
+        rec_error = ((np.asarray(data) - x_hat.detach().cpu().numpy()) ** 2).mean(axis=1)
 
         binary_predictions = (rec_error > self.threshold).astype(int)
         return binary_predictions, rec_error
@@ -84,10 +93,12 @@ class TemporalAutoencoder(Model):
         lr: float = 1e-2,
         threshold: float = 0.5,
         epochs: int = 20,
+        device: str | torch.device = "cpu",
     ):
         self.module = TemporalAutoencoderModule(encoder, decoder, lr)
         self.threshold = threshold
         self.epochs = epochs
+        self.device = torch.device(device)
 
     def fit(self, data: np.ndarray):
         dataset = TensorDataset(torch.Tensor(data))
@@ -98,8 +109,10 @@ class TemporalAutoencoder(Model):
 
     def predict(self, data: np.ndarray) -> (np.ndarray, np.ndarray):
         batch_size, seq_len, input_size = data.shape
-        x_hat = self.module(torch.Tensor(data)).detach()
-        rec_error = ((data - x_hat.numpy()) ** 2).mean(axis=2)
+        self.module.to(self.device)
+        with torch.no_grad():
+            x_hat = self.module(torch.tensor(np.array(data, dtype=np.float32, copy=True), device=self.device))
+        rec_error = ((np.asarray(data) - x_hat.detach().cpu().numpy()) ** 2).mean(axis=2)
         rec_error = rec_error.reshape((batch_size, seq_len, 1))
 
         binary_predictions = (rec_error > self.threshold).astype(int)
@@ -159,10 +172,12 @@ class VariationalTemporalAutoencoder(Model):
         lr: float = 1e-2,
         threshold: float = 0.5,
         epochs: int = 20,
+        device: str | torch.device = "cpu",
     ):
         self.module = VariationalTemporalAutoencoderModule(encoder, decoder, lr)
         self.threshold = threshold
         self.epochs = epochs
+        self.device = torch.device(device)
 
     def fit(self, data: np.ndarray):
         dataset = TensorDataset(torch.Tensor(data))
@@ -173,9 +188,12 @@ class VariationalTemporalAutoencoder(Model):
 
     def predict(self, data: np.ndarray) -> (np.ndarray, np.ndarray):
         batch_size, seq_len, input_size = data.shape
-        x_hat, mean, var = self.module(torch.Tensor(data))
-        x_hat = x_hat.detach()
-        rec_error = ((data - x_hat.numpy()) ** 2).mean(axis=2)
+        self.module.to(self.device)
+        with torch.no_grad():
+            x_hat, mean, var = self.module(
+                torch.tensor(np.array(data, dtype=np.float32, copy=True), device=self.device)
+            )
+        rec_error = ((np.asarray(data) - x_hat.detach().cpu().numpy()) ** 2).mean(axis=2)
         rec_error = rec_error.reshape((batch_size, seq_len, 1))
 
         binary_predictions = (rec_error > self.threshold).astype(int)

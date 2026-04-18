@@ -14,8 +14,6 @@ class TinyModule(nn.Module):
     def __init__(self):
         super().__init__()
         self.linear = nn.Linear(2, 2)
-        self.train_loss = nn.MSELoss()
-        self.lr = 1e-2
 
     def forward(self, x):
         return self.linear(x)
@@ -24,9 +22,6 @@ class TinyModule(nn.Module):
 class TinyTorchModel(Model):
     def __init__(self):
         self.module = TinyModule()
-        self.epochs = 1
-        self.batch_size = 2
-        self.device = torch.device("cpu")
 
     def fit(self, data: np.ndarray):
         raise AssertionError("AGEMStrategy should not delegate training to model.fit().")
@@ -39,7 +34,16 @@ class TinyTorchModel(Model):
 
 
 def test_agem_strategy_implements_replay_only_interface():
-    strategy = AGEMStrategy(TinyTorchModel(), BalancedReplayBuffer(max_size=8, seed=0))
+    model = TinyTorchModel()
+    strategy = AGEMStrategy(
+        model,
+        BalancedReplayBuffer(max_size=8, seed=0),
+        module=model.module,
+        batch_size=2,
+        lr=1e-2,
+        epochs=1,
+        device="cpu",
+    )
 
     assert isinstance(strategy, ReplayOnlyStrategy)
     assert strategy.name() == "AGEM"
@@ -48,7 +52,7 @@ def test_agem_strategy_implements_replay_only_interface():
 def test_agem_strategy_tracks_concepts_in_balanced_buffer():
     model = TinyTorchModel()
     buffer = BalancedReplayBuffer(max_size=8, seed=0)
-    strategy = AGEMStrategy(model, buffer)
+    strategy = AGEMStrategy(model, buffer, module=model.module, batch_size=2, lr=1e-2, epochs=1, device="cpu")
     first_concept = np.array([[1.0, 2.0], [2.0, 3.0]], dtype=np.float32)
     second_concept = np.array([[3.0, 4.0], [4.0, 5.0]], dtype=np.float32)
 
@@ -62,6 +66,9 @@ def test_agem_strategy_tracks_concepts_in_balanced_buffer():
     info = strategy.additional_info()
     assert info["task_count"] == 2
     assert info["concept_count"] == 2
+    assert info["batch_size"] == 2
+    assert info["optimizer"] == "sgd"
+    assert info["epochs"] == 1
     assert "replay_buffer" in info
 
 
@@ -74,6 +81,13 @@ def test_capture_gradients_is_available_as_static_utility():
     assert torch.equal(captured, torch.tensor([0.5, -1.5], dtype=torch.float32))
 
 
-def test_agem_strategy_requires_torch_backed_model():
-    with pytest.raises(TypeError, match="PyTorch-backed model"):
-        AGEMStrategy(MockModel())
+def test_agem_strategy_requires_explicit_torch_module():
+    with pytest.raises(TypeError, match="torch.nn.Module"):
+        AGEMStrategy(MockModel(), module="not-a-module")
+
+
+def test_agem_strategy_rejects_unknown_optimizer():
+    model = TinyTorchModel()
+
+    with pytest.raises(ValueError, match="optimizer must be 'sgd' or 'adam'"):
+        AGEMStrategy(model, module=model.module, optimizer="rmsprop")

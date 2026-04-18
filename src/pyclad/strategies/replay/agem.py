@@ -16,7 +16,7 @@ future tasks can be constrained against it as well.
 """
 
 import logging
-from typing import Dict, Optional, Sequence
+from typing import Callable, Dict, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -28,6 +28,9 @@ from pyclad.strategies.replay.buffers.buffer import ReplayBuffer
 from pyclad.strategies.replay.replay import ReplayOnlyStrategy
 
 logger = logging.getLogger(__name__)
+
+BatchLoss = Callable[[torch.nn.Module, torch.Tensor], torch.Tensor]
+DataTransform = Callable[[np.ndarray], np.ndarray]
 
 
 class AGEMStrategy(ReplayOnlyStrategy):
@@ -44,6 +47,10 @@ class AGEMStrategy(ReplayOnlyStrategy):
     does not simply retrain on concatenated old and new data. Instead, replay
     is used to shape the gradient direction so the model remains plastic on the
     current task without taking obviously destructive steps on past concepts.
+
+    The training contract is explicit: callers pass the trainable module, loss
+    function, input transform, and optimizer/data-loader settings directly to
+    the strategy instead of relying on hidden model introspection.
     """
 
     def __init__(
@@ -51,22 +58,46 @@ class AGEMStrategy(ReplayOnlyStrategy):
         model: Model,
         buffer: Optional[ReplayBuffer] = None,
         *,
+        module: torch.nn.Module,
+        loss_fn: Optional[BatchLoss] = None,
+        data_transform: Optional[DataTransform] = None,
+        batch_size: int = 32,
+        lr: float = 1e-2,
+        optimizer: str = "sgd",
+        epochs: int = 20,
+        device: Union[torch.device, str] = "cpu",
+        shuffle: bool = True,
         buffer_size: int = 500,
         seed: int = 7,
     ):
+        if not isinstance(module, torch.nn.Module):
+            raise TypeError("AGEMStrategy requires 'module' to be a torch.nn.Module.")
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+        if epochs <= 0:
+            raise ValueError(f"epochs must be positive, got {epochs}")
+        if lr <= 0:
+            raise ValueError(f"lr must be positive, got {lr}")
+        optimizer_name = optimizer.lower()
+        if optimizer_name not in {"sgd", "adam"}:
+            raise ValueError(f"optimizer must be 'sgd' or 'adam', got {optimizer}")
+
         self._seed = int(seed)
         self._rng = np.random.default_rng(self._seed)
         self._task_count = 0
         self._concept_to_index: Dict[str, int] = {}
+        self._module = module
+        self._loss_fn = self.default_loss_fn if loss_fn is None else loss_fn
+        self._data_transform = self.identity_transform if data_transform is None else data_transform
+        self._batch_size = int(batch_size)
+        self._lr = float(lr)
+        self._optimizer_name = optimizer_name
+        self._epochs = int(epochs)
+        self._device = torch.device(device)
+        self._shuffle = bool(shuffle)
 
         replay_buffer = buffer if buffer is not None else BalancedReplayBuffer(max_size=buffer_size, seed=self._seed)
         super().__init__(model, replay_buffer)
-
-        if self._resolve_trainable_module() is None:
-            raise TypeError(
-                "AGEMStrategy requires a PyTorch-backed model exposed via '.module' "
-                "or through a nested '.model' wrapper."
-            )
 
     def learn(self, data: np.ndarray, concept_id: Optional[str] = None, **kwargs) -> None:
         del kwargs
@@ -114,24 +145,27 @@ class AGEMStrategy(ReplayOnlyStrategy):
                 "seed": self._seed,
                 "task_count": self._task_count,
                 "concept_count": len(self._concept_to_index),
+                "batch_size": self._batch_size,
+                "lr": self._lr,
+                "optimizer": self._optimizer_name,
+                "epochs": self._epochs,
+                "device": str(self._device),
+                "shuffle": self._shuffle,
             }
         )
         return info
 
     def _fit(self, current_data: np.ndarray) -> None:
-        module = self._resolve_trainable_module()
-        if module is None:
-            raise TypeError("Model does not expose a trainable torch module required for AGEM.")
-
         tensor_data = self._prepare_data(current_data)
         dataloader = DataLoader(
             TensorDataset(tensor_data),
-            batch_size=self._resolve_batch_size(),
-            shuffle=self._resolve_shuffle(),
+            batch_size=self._batch_size,
+            shuffle=self._shuffle,
             num_workers=0,
         )
 
-        device = self._resolve_device()
+        module = self._module
+        device = self._device
         module.to(device)
         module.train()
 
@@ -139,8 +173,12 @@ class AGEMStrategy(ReplayOnlyStrategy):
         if not parameters:
             raise TypeError("AGEMStrategy requires at least one trainable parameter.")
 
-        optimizer = torch.optim.Adam(parameters, lr=self._resolve_lr())
-        epochs = self._resolve_epochs()
+        if self._optimizer_name == "adam":
+            logger.warning("AGEM with Adam is an approximation; SGD preserves the standard A-GEM update guarantee.")
+            optimizer = torch.optim.Adam(parameters, lr=self._lr)
+        else:
+            optimizer = torch.optim.SGD(parameters, lr=self._lr)
+        epochs = self._epochs
 
         for epoch in range(epochs):
             epoch_current = 0.0
@@ -154,19 +192,19 @@ class AGEMStrategy(ReplayOnlyStrategy):
                 # the update we would normally apply if no replay constraint
                 # existed.
                 optimizer.zero_grad()
-                current_loss = self._compute_batch_loss(module, batch)
+                current_loss = self._loss_fn(module, batch)
                 current_loss.backward()
                 current_grad = self.capture_gradients(parameters)
                 final_grad = current_grad
 
                 replay_loss = torch.tensor(0.0, device=device)
-                replay_examples = self._sample_replay_examples(self._resolve_batch_size())
+                replay_examples = self._sample_replay_examples(self._batch_size)
                 if replay_examples is not None:
                     # Then estimate how older concepts would like the model to
                     # move by taking a replay gradient from memory.
                     optimizer.zero_grad()
                     replay_batch = self._prepare_data(replay_examples).to(device)
-                    replay_loss = self._compute_batch_loss(module, replay_batch)
+                    replay_loss = self._loss_fn(module, replay_batch)
                     replay_loss.backward()
                     replay_grad = self.capture_gradients(parameters)
 
@@ -219,111 +257,8 @@ class AGEMStrategy(ReplayOnlyStrategy):
             self._concept_to_index[concept_id] = len(self._concept_to_index)
         return self._concept_to_index[concept_id]
 
-    def _resolve_trainable_module(self, model: Optional[Model] = None) -> Optional[torch.nn.Module]:
-        current = self._model if model is None else model
-        seen = set()
-
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
-
-            module = getattr(current, "module", None)
-            if isinstance(module, torch.nn.Module):
-                return module
-
-            module = getattr(current, "model", None)
-            if isinstance(module, torch.nn.Module):
-                return module
-
-            current = getattr(current, "model", None)
-
-        return None
-
-    def _resolve_model_attr(self, attr_name: str, default, model: Optional[Model] = None):
-        current = self._model if model is None else model
-        seen = set()
-
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
-
-            if hasattr(current, attr_name):
-                return getattr(current, attr_name)
-
-            module = getattr(current, "module", None)
-            if module is not None and hasattr(module, attr_name):
-                return getattr(module, attr_name)
-
-            current = getattr(current, "model", None)
-
-        return default
-
-    def _resolve_batch_size(self) -> int:
-        batch_size = self._resolve_model_attr("batch_size", 32)
-        return int(batch_size) if batch_size else 32
-
-    def _resolve_lr(self) -> float:
-        lr = self._resolve_model_attr("lr", 1e-2)
-        return float(lr) if lr else 1e-2
-
-    def _resolve_epochs(self) -> int:
-        epochs = self._resolve_model_attr("epochs", 20)
-        return int(epochs) if epochs else 20
-
-    def _resolve_device(self, model: Optional[Model] = None) -> torch.device:
-        explicit_device = self._resolve_model_attr("device", None, model)
-        if explicit_device is not None:
-            return torch.device(explicit_device)
-
-        module = self._resolve_trainable_module(model)
-        if module is not None:
-            try:
-                return next(module.parameters()).device
-            except (AttributeError, StopIteration):
-                pass
-
-        return torch.device("cpu")
-
-    def _resolve_shuffle(self) -> bool:
-        current = self._model
-        seen = set()
-
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
-
-            current_name = current.__class__.__name__
-            if current_name in {"TemporalAutoencoder", "VariationalTemporalAutoencoder"}:
-                return False
-            if current_name == "Autoencoder":
-                return True
-
-            module = getattr(current, "module", None)
-            if module is not None:
-                module_name = module.__class__.__name__
-                if module_name in {"TemporalAutoencoderModule", "VariationalTemporalAutoencoderModule"}:
-                    return False
-                if module_name == "AutoencoderModule":
-                    return True
-
-            current = getattr(current, "model", None)
-
-        return True
-
-    def _transform_data_for_model(self, data: np.ndarray, model: Optional[Model] = None) -> np.ndarray:
-        current = self._model if model is None else model
-        transformed = np.asarray(data)
-        seen = set()
-
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
-
-            if current.__class__.__name__ == "FlattenTimeSeriesAdapter":
-                transformed = transformed.reshape(transformed.shape[0], -1)
-
-            current = getattr(current, "model", None)
-
-        return np.array(transformed, copy=True)
-
     def _prepare_data(self, data: np.ndarray) -> torch.Tensor:
-        transformed = self._transform_data_for_model(data)
+        transformed = np.array(self._data_transform(np.asarray(data)), dtype=np.float32, copy=True)
         return torch.tensor(transformed, dtype=torch.float32)
 
     @staticmethod
@@ -333,23 +268,18 @@ class AGEMStrategy(ReplayOnlyStrategy):
             return output[0], tuple(output[1:])
         return output, tuple()
 
-    def _compute_batch_loss(self, module: torch.nn.Module, batch: torch.Tensor) -> torch.Tensor:
-        x_hat, extras = self._forward_batch(module, batch)
-        train_loss = getattr(module, "train_loss", None)
+    @staticmethod
+    def identity_transform(data: np.ndarray) -> np.ndarray:
+        return np.array(data, copy=True)
 
-        if callable(train_loss):
-            try:
-                if len(extras) >= 2:
-                    return train_loss(x_hat, batch, extras[0], extras[1])
-                return train_loss(x_hat, batch)
-            except TypeError:
-                try:
-                    if len(extras) >= 2:
-                        return train_loss(batch, x_hat, extras[0], extras[1])
-                    return train_loss(batch, x_hat)
-                except TypeError:
-                    pass
-
+    @staticmethod
+    def default_loss_fn(module: torch.nn.Module, batch: torch.Tensor) -> torch.Tensor:
+        x_hat, _ = AGEMStrategy._forward_batch(module, batch)
+        if x_hat.shape != batch.shape:
+            raise ValueError(
+                "AGEMStrategy.default_loss_fn expects the module output to have the same shape as the input batch. "
+                "Pass a custom loss_fn for models with a different training objective."
+            )
         return torch.nn.functional.mse_loss(x_hat, batch)
 
     @staticmethod

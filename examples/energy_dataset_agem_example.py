@@ -1,5 +1,6 @@
 import logging
 import pathlib
+import torch
 import torch.nn as nn
 
 from pyclad.callbacks.evaluation.concept_metric_evaluation import ConceptMetricCallback
@@ -25,6 +26,7 @@ if __name__ == "__main__":
     detection using the method proposed here <https://github.com/lifelonglab/lifelong-anomaly-detection-scenarios>
     """
     dataset = EnergyPlantsDataset(dataset_type="random_anomalies")
+    device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     # dataset = convert_dataset_to_overlapping_windows(window_size=10, dataset=dataset)
 
     input_features = 14
@@ -46,9 +48,18 @@ if __name__ == "__main__":
         nn.Sigmoid(),
     )
 
-    model = Autoencoder(encoder, decoder)
+    model = Autoencoder(encoder, decoder, epochs=40, device=device)
 
-    strategy = AGEMStrategy(model, BalancedReplayBuffer(max_size=2000))
+    strategy = AGEMStrategy(
+        model,
+        BalancedReplayBuffer(max_size=1000),
+        module=model.module,
+        batch_size=32,
+        lr=1e-2,
+        epochs=60,
+        device=device,
+        shuffle=True,
+    )
     callbacks = [
         ConceptMetricCallback(
             base_metric=RocAuc(),
