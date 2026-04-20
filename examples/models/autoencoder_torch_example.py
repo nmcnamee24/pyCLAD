@@ -51,7 +51,7 @@ if __name__ == "__main__":
     callbacks = [
         ConceptMetricCallback(
             base_metric=RocAuc(),
-            metrics=[ContinualAverage(), BackwardTransfer(), ForwardTransfer()],
+            summarized_metrics=[ContinualAverage(), BackwardTransfer(), ForwardTransfer()],
         ),
         TimeEvaluationCallback(),
     ]

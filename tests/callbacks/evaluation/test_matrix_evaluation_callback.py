@@ -8,7 +8,7 @@ from pyclad.data.concept import Concept
 from pyclad.metrics.base.base_metric import BaseMetric
 from pyclad.metrics.continual.concepts_metric import (
     ConceptLevelMatrix,
-    ConceptLevelMetric,
+    SummarizedMetric,
 )
 
 
@@ -25,7 +25,7 @@ def _get_info(callback):
     return callback.info()["concept_metric_callback_BaseMetricMock"]
 
 
-class ContinualMetricMock(ConceptLevelMetric):
+class ContinualMetricMock(SummarizedMetric):
 
     def compute(self, metric_matrix: ConceptLevelMatrix) -> float:
         pass
