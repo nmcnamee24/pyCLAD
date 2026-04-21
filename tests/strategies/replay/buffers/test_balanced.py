@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from numpy.testing import assert_array_equal
 
 from pyclad.strategies.replay.buffers.balanced import BalancedReplayBuffer
@@ -47,3 +48,20 @@ def test_rebalancing_balanced_buffer_drops_from_largest_concept():
     assert len(buffer.data()) == 4
     assert np.count_nonzero(concept_indices == 0) == 2
     assert np.count_nonzero(concept_indices == 1) == 2
+
+
+def test_rebalancing_balanced_buffer_preserves_auxiliary_field_alignment():
+    buffer = BalancedReplayBuffer(max_size=4, seed=0)
+    examples = np.array([[0], [1], [2], [3], [10], [11], [12], [13]], dtype=np.float32)
+    concept_indices = np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int64)
+    losses = np.array([0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0], dtype=np.float32)
+
+    buffer.add(examples=examples, concept_indices=concept_indices, reconstruction_loss=losses)
+
+    sample = buffer.arrays()
+    observed_mapping = {
+        int(example[0]): float(loss) for example, loss in zip(sample["examples"], sample["reconstruction_loss"], strict=True)
+    }
+
+    for key, value in observed_mapping.items():
+        assert value == pytest.approx(float(key))

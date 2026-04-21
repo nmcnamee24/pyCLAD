@@ -1,20 +1,3 @@
-"""A-GEM replay strategy for torch-backed reconstruction models.
-
-This implementation treats each incoming batch/window as the current task and
-keeps a small replay buffer with examples from earlier concepts. During
-training, it computes two gradients:
-
-1. the gradient of the reconstruction loss on the current data;
-2. the gradient of the reconstruction loss on a replay batch.
-
-If the current gradient would increase loss on replay data, A-GEM projects it
-onto the half-space that does not interfere with the replay gradient. In
-practice, this means the model is still free to adapt to the new concept, but
-it avoids updates that directly conflict with what it learned from earlier
-concepts. After optimization, the new concept is added to the replay buffer so
-future tasks can be constrained against it as well.
-"""
-
 import logging
 from typing import Callable, Dict, Optional, Sequence, Union
 
@@ -34,23 +17,21 @@ DataTransform = Callable[[np.ndarray], np.ndarray]
 
 
 class AGEMStrategy(ReplayOnlyStrategy):
-    """A-GEM strategy using replay-gradient projection.
+    """A-GEM replay strategy for torch-backed reconstruction models.
 
-    Narrative view of the strategy:
-    - learn the current concept with a normal reconstruction objective;
-    - check whether that update would hurt replayed older concepts;
-    - if it would, replace the update with its projected, less-forgetting
-      version;
-    - store the current concept in replay memory for future constraints.
+    This implementation treats each incoming batch/window as the current task and
+    keeps a small replay buffer with examples from earlier concepts. During
+    training, it computes two gradients:
 
-    This makes A-GEM a replay-driven strategy, but unlike vanilla replay it
-    does not simply retrain on concatenated old and new data. Instead, replay
-    is used to shape the gradient direction so the model remains plastic on the
-    current task without taking obviously destructive steps on past concepts.
+    1. the gradient of the reconstruction loss on the current data;
+    2. the gradient of the reconstruction loss on a replay batch.
 
-    The training contract is explicit: callers pass the trainable module, loss
-    function, input transform, and optimizer/data-loader settings directly to
-    the strategy instead of relying on hidden model introspection.
+    If the current gradient would increase loss on replay data, A-GEM projects it
+    onto the half-space that does not interfere with the replay gradient. In
+    practice, this means the model is still free to adapt to the new concept, but
+    it avoids updates that directly conflict with what it learned from earlier
+    concepts. After optimization, the new concept is added to the replay buffer so
+    future tasks can be constrained against it as well.
     """
 
     def __init__(
@@ -62,8 +43,10 @@ class AGEMStrategy(ReplayOnlyStrategy):
         loss_fn: Optional[BatchLoss] = None,
         data_transform: Optional[DataTransform] = None,
         batch_size: int = 32,
+        replay_batch_size: Optional[int] = None,
         lr: float = 1e-2,
         optimizer: str = "sgd",
+        projection_tolerance: float = 1e-6,
         epochs: int = 20,
         device: Union[torch.device, str] = "cpu",
         shuffle: bool = True,
@@ -74,6 +57,10 @@ class AGEMStrategy(ReplayOnlyStrategy):
             raise TypeError("AGEMStrategy requires 'module' to be a torch.nn.Module.")
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}")
+        if replay_batch_size is not None and replay_batch_size <= 0:
+            raise ValueError(f"replay_batch_size must be positive, got {replay_batch_size}")
+        if projection_tolerance < 0:
+            raise ValueError(f"projection_tolerance must be non-negative, got {projection_tolerance}")
         if epochs <= 0:
             raise ValueError(f"epochs must be positive, got {epochs}")
         if lr <= 0:
@@ -90,8 +77,10 @@ class AGEMStrategy(ReplayOnlyStrategy):
         self._loss_fn = self.default_loss_fn if loss_fn is None else loss_fn
         self._data_transform = self.identity_transform if data_transform is None else data_transform
         self._batch_size = int(batch_size)
+        self._replay_batch_size = int(replay_batch_size) if replay_batch_size is not None else self._batch_size
         self._lr = float(lr)
         self._optimizer_name = optimizer_name
+        self._projection_tolerance = float(projection_tolerance)
         self._epochs = int(epochs)
         self._device = torch.device(device)
         self._shuffle = bool(shuffle)
@@ -108,10 +97,10 @@ class AGEMStrategy(ReplayOnlyStrategy):
 
         concept_name = concept_id or f"concept_{self._task_count}"
         concept_index = self._concept_index(concept_name)
-        replay_data = np.array(self._buffer.data(), copy=True)
 
         logger.info("AGEM learn on %s with %s samples", concept_name, len(current_data))
         self._fit(current_data)
+        replay_data_for_calibration = np.array(self._buffer.data(), copy=True)
 
         if isinstance(self._buffer, BalancedReplayBuffer):
             self._buffer.add(
@@ -122,8 +111,8 @@ class AGEMStrategy(ReplayOnlyStrategy):
             self._buffer.update(current_data)
 
         calibration_data = current_data
-        if len(replay_data) > 0:
-            calibration_data = np.concatenate([replay_data, current_data], axis=0)
+        if len(replay_data_for_calibration) > 0:
+            calibration_data = np.concatenate([replay_data_for_calibration, current_data], axis=0)
 
         if hasattr(self._model, "_auto_threshold") and self._model._auto_threshold:
             self._model._calibrate_threshold(calibration_data)
@@ -146,8 +135,10 @@ class AGEMStrategy(ReplayOnlyStrategy):
                 "task_count": self._task_count,
                 "concept_count": len(self._concept_to_index),
                 "batch_size": self._batch_size,
+                "replay_batch_size": self._replay_batch_size,
                 "lr": self._lr,
                 "optimizer": self._optimizer_name,
+                "projection_tolerance": self._projection_tolerance,
                 "epochs": self._epochs,
                 "device": str(self._device),
                 "shuffle": self._shuffle,
@@ -198,7 +189,7 @@ class AGEMStrategy(ReplayOnlyStrategy):
                 final_grad = current_grad
 
                 replay_loss = torch.tensor(0.0, device=device)
-                replay_examples = self._sample_replay_examples(self._batch_size)
+                replay_examples = self._sample_replay_examples(self._replay_batch_size)
                 if replay_examples is not None:
                     # Then estimate how older concepts would like the model to
                     # move by taking a replay gradient from memory.
@@ -213,7 +204,7 @@ class AGEMStrategy(ReplayOnlyStrategy):
                     # projects the current gradient to remove the conflicting
                     # component while preserving as much useful progress as
                     # possible.
-                    if torch.dot(current_grad, replay_grad).item() < 0:
+                    if self.should_project(current_grad, replay_grad, self._projection_tolerance):
                         final_grad = self.project_gradient(current_grad, replay_grad)
                         projection_count += 1
 
@@ -242,6 +233,8 @@ class AGEMStrategy(ReplayOnlyStrategy):
         if isinstance(self._buffer, BalancedReplayBuffer):
             if self._buffer.is_empty():
                 return None
+            if batch_size >= len(self._buffer):
+                return self._buffer.data()
             return self._buffer.sample(batch_size)["examples"]
 
         replay_data = self._buffer.data()
@@ -249,6 +242,8 @@ class AGEMStrategy(ReplayOnlyStrategy):
             return None
 
         sample_size = min(int(batch_size), len(replay_data))
+        if sample_size == len(replay_data):
+            return np.array(replay_data, copy=True)
         indices = self._rng.choice(len(replay_data), size=sample_size, replace=False)
         return np.asarray(replay_data)[indices]
 
@@ -311,8 +306,26 @@ class AGEMStrategy(ReplayOnlyStrategy):
             return current
 
         reference_norm = torch.dot(reference, reference)
-        if reference_norm.item() <= 0:
+        if not torch.isfinite(reference_norm) or reference_norm.item() <= 0:
             return current
 
-        correction = torch.dot(current, reference) / reference_norm
+        correction_numerator = torch.dot(current, reference)
+        if not torch.isfinite(correction_numerator):
+            return current
+
+        correction = correction_numerator / reference_norm
+        if not torch.isfinite(correction):
+            return current
+
         return current - correction * reference
+
+    @staticmethod
+    def should_project(current: torch.Tensor, reference: torch.Tensor, tolerance: float = 0.0) -> bool:
+        if current.numel() == 0 or reference.numel() == 0:
+            return False
+
+        dot_product = torch.dot(current, reference)
+        if not torch.isfinite(dot_product):
+            return False
+
+        return dot_product.item() < -float(tolerance)

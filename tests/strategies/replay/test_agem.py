@@ -67,7 +67,9 @@ def test_agem_strategy_tracks_concepts_in_balanced_buffer():
     assert info["task_count"] == 2
     assert info["concept_count"] == 2
     assert info["batch_size"] == 2
+    assert info["replay_batch_size"] == 2
     assert info["optimizer"] == "sgd"
+    assert info["projection_tolerance"] == pytest.approx(1e-6)
     assert info["epochs"] == 1
     assert "replay_buffer" in info
 
@@ -91,3 +93,35 @@ def test_agem_strategy_rejects_unknown_optimizer():
 
     with pytest.raises(ValueError, match="optimizer must be 'sgd' or 'adam'"):
         AGEMStrategy(model, module=model.module, optimizer="rmsprop")
+
+
+def test_agem_strategy_rejects_negative_projection_tolerance():
+    model = TinyTorchModel()
+
+    with pytest.raises(ValueError, match="projection_tolerance must be non-negative"):
+        AGEMStrategy(model, module=model.module, projection_tolerance=-1e-6)
+
+
+def test_agem_strategy_allows_distinct_replay_batch_size():
+    model = TinyTorchModel()
+    strategy = AGEMStrategy(model, module=model.module, batch_size=4, replay_batch_size=2)
+
+    assert strategy.additional_info()["batch_size"] == 4
+    assert strategy.additional_info()["replay_batch_size"] == 2
+
+
+def test_should_project_respects_tolerance():
+    current = torch.tensor([1.0, 1.0], dtype=torch.float32)
+    reference = torch.tensor([-1.0, 1.0 - 5e-7], dtype=torch.float32)
+
+    assert not AGEMStrategy.should_project(current, reference, tolerance=1e-6)
+    assert AGEMStrategy.should_project(current, reference, tolerance=1e-8)
+
+
+def test_project_gradient_returns_current_for_non_finite_reference_norm():
+    current = torch.tensor([1.0, 2.0], dtype=torch.float32)
+    reference = torch.tensor([float("nan"), 0.0], dtype=torch.float32)
+
+    projected = AGEMStrategy.project_gradient(current, reference)
+
+    assert torch.equal(projected, current)

@@ -113,17 +113,31 @@ class BalancedReplayBuffer(ReplayBuffer):
             raise ValueError(f"{field_name} shape mismatch: expected {expected_shape}, got {shape}")
 
     def _rebalance(self) -> None:
-        while len(self) > self._max_size:
-            counts = Counter(self._fields["concept_indices"])
+        excess = len(self) - self._max_size
+        if excess <= 0:
+            return
+
+        concept_indices = self._fields["concept_indices"]
+        counts = Counter(concept_indices)
+        candidates_by_concept: Dict[int, list[int]] = {}
+        for index, concept_index in enumerate(concept_indices):
+            candidates_by_concept.setdefault(concept_index, []).append(index)
+
+        drop_indices = set()
+        while excess > 0:
             largest_concept = max(counts.items(), key=lambda item: (item[1], item[0]))[0]
-            candidates = [
-                index
-                for index, concept_index in enumerate(self._fields["concept_indices"])
-                if concept_index == largest_concept
-            ]
-            drop_index = int(self._rng.choice(candidates))
-            for values in self._fields.values():
-                del values[drop_index]
+            candidates = candidates_by_concept[largest_concept]
+            drop_offset = int(self._rng.integers(len(candidates)))
+            drop_indices.add(candidates.pop(drop_offset))
+            counts[largest_concept] -= 1
+            if counts[largest_concept] == 0:
+                del counts[largest_concept]
+                del candidates_by_concept[largest_concept]
+            excess -= 1
+
+        kept_indices = [index for index in range(len(concept_indices)) if index not in drop_indices]
+        for field_name, values in self._fields.items():
+            self._fields[field_name] = [values[index] for index in kept_indices]
 
     def _stack_field(self, field_name: str, values: Sequence) -> np.ndarray:
         if not values:
