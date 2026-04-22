@@ -43,7 +43,19 @@ if __name__ == "__main__":
 
     model = Autoencoder(encoder, decoder)
 
-    strategy = EWCStrategy(model)
+    strategy = EWCStrategy(
+        model,
+        module=model.module,
+        loss_fn=EWCStrategy.default_loss_fn,
+        data_transform=EWCStrategy.identity_transform,
+        batch_size=32,
+        lr=model.module.lr,
+        epochs=model.epochs,
+        device="cpu",
+        shuffle=True,
+        fisher_estimation_mode="eval",
+        constraint_retention="all",
+    )
     callbacks = [
         ConceptMetricCallback(
             base_metric=RocAuc(),
