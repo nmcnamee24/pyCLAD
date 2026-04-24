@@ -32,6 +32,12 @@ class AGEMStrategy(ReplayOnlyStrategy):
     it avoids updates that directly conflict with what it learned from earlier
     concepts. After optimization, the new concept is added to the replay buffer so
     future tasks can be constrained against it as well.
+
+    SGD is the default optimizer because the standard A-GEM guarantee is derived
+    for a step taken directly along the projected gradient. Adaptive optimizers
+    such as Adam can still be used as a heuristic, but their per-parameter
+    rescaling changes the final update direction and therefore voids that
+    guarantee.
     """
 
     def __init__(
@@ -84,6 +90,7 @@ class AGEMStrategy(ReplayOnlyStrategy):
         self._epochs = int(epochs)
         self._device = torch.device(device)
         self._shuffle = bool(shuffle)
+        self._adam_warning_emitted = False
 
         replay_buffer = buffer if buffer is not None else BalancedReplayBuffer(max_size=buffer_size, seed=self._seed)
         super().__init__(model, replay_buffer)
@@ -165,11 +172,21 @@ class AGEMStrategy(ReplayOnlyStrategy):
             raise TypeError("AGEMStrategy requires at least one trainable parameter.")
 
         if self._optimizer_name == "adam":
-            logger.warning("AGEM with Adam is an approximation; SGD preserves the standard A-GEM update guarantee.")
+            if not self._adam_warning_emitted:
+                logger.warning(
+                    "AGEM with Adam does not preserve the standard A-GEM guarantee because Adam rescales "
+                    "projected gradients with adaptive moment estimates. Use optimizer='sgd' for "
+                    "guarantee-preserving updates."
+                )
+                self._adam_warning_emitted = True
             optimizer = torch.optim.Adam(parameters, lr=self._lr)
         else:
             optimizer = torch.optim.SGD(parameters, lr=self._lr)
         epochs = self._epochs
+        if isinstance(self._buffer, BalancedReplayBuffer):
+            has_replay_data = not self._buffer.is_empty()
+        else:
+            has_replay_data = len(self._buffer.data()) > 0
 
         for epoch in range(epochs):
             epoch_current = 0.0
@@ -186,29 +203,46 @@ class AGEMStrategy(ReplayOnlyStrategy):
                 current_loss = self._loss_fn(module, batch)
                 current_loss.backward()
                 current_grad = self.capture_gradients(parameters)
+                if not self.gradients_are_finite(current_grad):
+                    logger.warning("Skipping AGEM update because the current gradient contains non-finite values.")
+                    optimizer.zero_grad()
+                    continue
                 final_grad = current_grad
 
                 replay_loss = torch.tensor(0.0, device=device)
-                replay_examples = self._sample_replay_examples(self._replay_batch_size)
-                if replay_examples is not None:
+                if has_replay_data:
                     # Then estimate how older concepts would like the model to
                     # move by taking a replay gradient from memory.
-                    optimizer.zero_grad()
-                    replay_batch = self._prepare_data(replay_examples).to(device)
-                    replay_loss = self._loss_fn(module, replay_batch)
-                    replay_loss.backward()
-                    replay_grad = self.capture_gradients(parameters)
+                    replay_examples = self._sample_replay_examples(self._replay_batch_size)
+                    if replay_examples is not None:
+                        optimizer.zero_grad()
+                        replay_batch = self._prepare_data(replay_examples).to(device)
+                        replay_loss = self._loss_fn(module, replay_batch)
+                        replay_loss.backward()
+                        replay_grad = self.capture_gradients(parameters)
+                        if not self.gradients_are_finite(replay_grad):
+                            logger.warning(
+                                "Skipping AGEM update because the replay gradient contains non-finite values."
+                            )
+                            optimizer.zero_grad()
+                            continue
 
-                    # A negative dot product means the current update would
-                    # interfere with replay performance. In that case A-GEM
-                    # projects the current gradient to remove the conflicting
-                    # component while preserving as much useful progress as
-                    # possible.
-                    if self.should_project(current_grad, replay_grad, self._projection_tolerance):
-                        final_grad = self.project_gradient(current_grad, replay_grad)
-                        projection_count += 1
+                        # A negative dot product means the current update would
+                        # interfere with replay performance. In that case A-GEM
+                        # projects the current gradient to remove the conflicting
+                        # component while preserving as much useful progress as
+                        # possible.
+                        if self.should_project(current_grad, replay_grad, self._projection_tolerance):
+                            final_grad = self.project_gradient(current_grad, replay_grad)
+                            projection_count += 1
 
                 optimizer.zero_grad()
+                if not self.gradients_are_finite(final_grad):
+                    logger.warning("Skipping AGEM update because the final AGEM gradient contains non-finite values.")
+                    continue
+                # The backward passes above only write to parameter.grad. Clearing
+                # gradients here and restoring final_grad means optimizer.step()
+                # consumes exactly the projected gradient for this batch.
                 self.restore_gradients(parameters, final_grad)
                 optimizer.step()
 
@@ -253,23 +287,16 @@ class AGEMStrategy(ReplayOnlyStrategy):
         return self._concept_to_index[concept_id]
 
     def _prepare_data(self, data: np.ndarray) -> torch.Tensor:
-        transformed = np.array(self._data_transform(np.asarray(data)), dtype=np.float32, copy=True)
-        return torch.tensor(transformed, dtype=torch.float32)
-
-    @staticmethod
-    def _forward_batch(module: torch.nn.Module, batch: torch.Tensor) -> tuple[torch.Tensor, tuple]:
-        output = module(batch)
-        if isinstance(output, (tuple, list)):
-            return output[0], tuple(output[1:])
-        return output, tuple()
+        return torch.as_tensor(self._data_transform(np.asarray(data)), dtype=torch.float32)
 
     @staticmethod
     def identity_transform(data: np.ndarray) -> np.ndarray:
-        return np.array(data, copy=True)
+        return data
 
     @staticmethod
     def default_loss_fn(module: torch.nn.Module, batch: torch.Tensor) -> torch.Tensor:
-        x_hat, _ = AGEMStrategy._forward_batch(module, batch)
+        output = module(batch)
+        x_hat = output[0] if isinstance(output, (tuple, list)) else output
         if x_hat.shape != batch.shape:
             raise ValueError(
                 "AGEMStrategy.default_loss_fn expects the module output to have the same shape as the input batch. "
@@ -279,6 +306,13 @@ class AGEMStrategy(ReplayOnlyStrategy):
 
     @staticmethod
     def capture_gradients(parameters: Sequence[torch.nn.Parameter]) -> torch.Tensor:
+        devices = {parameter.device for parameter in parameters}
+        if len(devices) > 1:
+            raise ValueError(
+                "AGEMStrategy requires all trainable parameters to live on a single device; "
+                "model-parallel parameter sets are not supported."
+            )
+
         flat_parts = []
         for parameter in parameters:
             if parameter.grad is None:
@@ -297,7 +331,7 @@ class AGEMStrategy(ReplayOnlyStrategy):
         for parameter in parameters:
             numel = parameter.numel()
             grad_slice = flat_gradient[offset : offset + numel].view_as(parameter)
-            parameter.grad = grad_slice.clone().to(device=parameter.device, dtype=parameter.dtype)
+            parameter.grad = grad_slice.clone()
             offset += numel
 
     @staticmethod
@@ -326,6 +360,11 @@ class AGEMStrategy(ReplayOnlyStrategy):
 
         dot_product = torch.dot(current, reference)
         if not torch.isfinite(dot_product):
+            logger.warning("Skipping AGEM projection because the gradient dot product is non-finite.")
             return False
 
         return dot_product.item() < -float(tolerance)
+
+    @staticmethod
+    def gradients_are_finite(gradient: torch.Tensor) -> bool:
+        return bool(torch.isfinite(gradient).all())
