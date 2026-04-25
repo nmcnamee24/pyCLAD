@@ -43,6 +43,7 @@ if __name__ == "__main__":
 
     model = Autoencoder(encoder, decoder)
 
+    # Reconstruction losses often need a much larger lambda than the generic EWC default.
     strategy = EWCStrategy(
         model,
         module=model.module,
@@ -50,9 +51,10 @@ if __name__ == "__main__":
         data_transform=EWCStrategy.identity_transform,
         batch_size=32,
         lr=model.module.lr,
-        epochs=model.epochs,
-        device="cpu",
+        epochs=30,
+        device=model.device,
         shuffle=True,
+        ewc_lambda=10000.0,
         fisher_estimation_mode="eval",
         constraint_retention="all",
     )
