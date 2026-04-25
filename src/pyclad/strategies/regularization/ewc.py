@@ -68,7 +68,9 @@ class EWCStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
         self._module = module if module is not None else self._find_trainable_module(model)
         self._loss_fn = self.default_loss_fn if loss_fn is None else loss_fn
         self._data_transform = self.identity_transform if data_transform is None else data_transform
-        self._batch_size = self._resolve_positive_int("batch_size", batch_size, self._resolve_model_attr("batch_size", 32))
+        self._batch_size = self._resolve_positive_int(
+            "batch_size", batch_size, self._resolve_model_attr("batch_size", 32)
+        )
         self._lr = self._resolve_positive_float("lr", lr, self._resolve_model_attr("lr", 1e-2))
         self._epochs = self._resolve_positive_int("epochs", epochs, self._resolve_model_attr("epochs", 20))
         self._device = self._resolve_device(device)
@@ -239,7 +241,11 @@ class EWCStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
     ) -> Optional[tuple]:
         try:
             if isinstance(train_loss, torch.nn.Module):
-                target = train_loss.__call__ if type(train_loss).__call__ is not torch.nn.Module.__call__ else train_loss.forward
+                target = (
+                    train_loss.__call__
+                    if type(train_loss).__call__ is not torch.nn.Module.__call__
+                    else train_loss.forward
+                )
             else:
                 target = train_loss
             parameters = list(inspect.signature(target).parameters.values())
@@ -357,7 +363,9 @@ class EWCStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
         return "EWC"
 
     def additional_info(self) -> Dict:
-        total_params = sum(sum(param.numel() for param in task_params.values()) for task_params in self._saved_params.values())
+        total_params = sum(
+            sum(param.numel() for param in task_params.values()) for task_params in self._saved_params.values()
+        )
         total_importances = sum(
             sum(importance.numel() for importance in task_importances.values())
             for task_importances in self._importances.values()
@@ -402,7 +410,9 @@ class EWCStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
 
         importance_sum = {name: torch.zeros_like(param, device=cache_device) for name, param in named_params.items()}
         reference_sum = {name: torch.zeros_like(param, device=cache_device) for name, param in named_params.items()}
-        reference_square_sum = {name: torch.zeros_like(param, device=cache_device) for name, param in named_params.items()}
+        reference_square_sum = {
+            name: torch.zeros_like(param, device=cache_device) for name, param in named_params.items()
+        }
 
         for task_id, task_params in self._saved_params.items():
             task_importances = self._importances.get(task_id, {})
@@ -453,9 +463,9 @@ class EWCStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
                 reference_sum = reference_sum.to(device=param.device, dtype=param.dtype)
                 reference_square_sum = reference_square_sum.to(device=param.device, dtype=param.dtype)
 
-            penalty = penalty + (
-                importance_sum * param.pow(2) - 2.0 * reference_sum * param + reference_square_sum
-            ).sum()
+            penalty = (
+                penalty + (importance_sum * param.pow(2) - 2.0 * reference_sum * param + reference_square_sum).sum()
+            )
 
         return 0.5 * penalty
 
