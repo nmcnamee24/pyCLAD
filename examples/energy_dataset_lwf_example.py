@@ -44,9 +44,9 @@ if __name__ == "__main__":
         nn.Sigmoid(),
     )
 
-    model = Autoencoder(encoder, decoder)
+    model = Autoencoder(encoder, decoder, lr=.003)
     
-    strategy = LwFStrategy(model)
+    strategy = LwFStrategy(model, alpha=.5, epochs=60)
     callbacks = [
         ConceptMetricCallback(
             base_metric=RocAuc(),
@@ -58,5 +58,5 @@ if __name__ == "__main__":
     scenario = ConceptAwareScenario(dataset, strategy=strategy, callbacks=callbacks)
     scenario.run()
 
-    output_writer = JsonOutputWriter(pathlib.Path("output-energy.json"))
+    output_writer = JsonOutputWriter(pathlib.Path("output-energy-LwF.json"))
     output_writer.write([model, dataset, strategy, *callbacks])

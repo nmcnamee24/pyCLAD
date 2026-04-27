@@ -1,11 +1,11 @@
-"""Learning without Forgetting (LwF) strategy for continual learning."""
+"""Learning without Forgetting (LwF) strategy for PyCLAD autoencoders."""
 
 import copy
-import logging
-from typing import Dict, Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
 from pyclad.models.model import Model
@@ -14,371 +14,240 @@ from pyclad.strategies.strategy import (
     ConceptIncrementalStrategy,
 )
 
-logger = logging.getLogger(__name__)
-
 
 class LwFStrategy(ConceptIncrementalStrategy, ConceptAgnosticStrategy):
-    """
-    Learning without Forgetting strategy using knowledge distillation.
+    def __init__(
+        self,
+        model: Model,
+        alpha: float = 0.5,
+        distill_mode: str = "hybrid",
+        adaptive_balance: bool = True,
+        epochs: int | None = None,
+    ):
+        if distill_mode not in {"latent", "reconstruction", "hybrid"}:
+            raise ValueError("distill_mode must be 'latent', 'reconstruction', or 'hybrid'")
+        if epochs is not None and int(epochs) <= 0:
+            raise ValueError("epochs must be positive")
 
-    Prevents catastrophic forgetting by maintaining a frozen copy of the model
-    from the previous task and using it to regularize training on new data.
-    The new model learns to both reconstruct new data well AND preserve the
-    knowledge encoded in the old model's latent representations.
-
-    Parameters
-    ----------
-    model : Model
-        The continual learning model (must support distillation)
-    alpha : float, optional
-        Weight for distillation loss (default: 0.5)
-        Higher values preserve more old knowledge but may limit adaptation
-    distill_mode : str, optional
-        Type of distillation: 'latent', 'reconstruction', or 'hybrid' (default: 'latent')
-    """
-
-    def __init__(self, model: Model, alpha: float = 0.5, distill_mode: str = "latent"):
         self._model = model
-        self._old_model: Optional[Model] = None
+        self._old_model: Model | None = None
         self._alpha = alpha
         self._distill_mode = distill_mode
+        self._adaptive_balance = adaptive_balance
+        self._epochs = int(epochs) if epochs is not None else None
         self._task_count = 0
 
-        if distill_mode not in ["latent", "reconstruction", "hybrid"]:
-            raise ValueError(
-                f"Invalid distill_mode: {distill_mode}. " f"Must be 'latent', 'reconstruction', or 'hybrid'"
-            )
+        self._module()
 
-    def learn(self, data: np.ndarray, *args, **kwargs) -> None:
-        """
-        Learn from new data using knowledge distillation if not the first task.
-
-        Parameters
-        ----------
-        data : np.ndarray
-            Training data for the current task/window
-        """
-        # First task: train normally without distillation
+    def learn(self, data, *args, **kwargs):
         if self._old_model is None:
-            logger.info(f"Task {self._task_count + 1}: Training without distillation (first task)")
-            self._model.fit(data)
+            owner = next((model for model in self._iter_wrapped() if hasattr(model, "epochs")), None)
+            if self._epochs is None or owner is None:
+                self._model.fit(data)
+            else:
+                previous_epochs = owner.epochs
+                owner.epochs = self._epochs
+                try:
+                    self._model.fit(data)
+                finally:
+                    owner.epochs = previous_epochs
         else:
-            # Subsequent tasks: train with distillation from old model
-            logger.info(
-                f"Task {self._task_count + 1}: Training with LwF distillation "
-                f"(alpha={self._alpha}, mode={self._distill_mode})"
-            )
             self._fit_with_distillation(data)
-
         self._task_count += 1
-
-        # Clone current model as old model for next task
         self._old_model = self._clone_model()
 
-    def predict(self, data: np.ndarray, *args, **kwargs) -> tuple:
-        """
-        Predict anomalies using the current model.
-
-        Parameters
-        ----------
-        data : np.ndarray
-            Data to predict on
-
-        Returns
-        -------
-        tuple
-            (predicted labels, anomaly scores)
-        """
+    def predict(self, data, *args, **kwargs) -> tuple:
         return self._model.predict(data)
 
     def name(self) -> str:
-        """Return strategy name."""
         return "LwF"
 
-    def additional_info(self) -> Dict:
-        """Return additional strategy information."""
+    def additional_info(self):
         return {
             "model": self._model.name(),
             "alpha": self._alpha,
             "distill_mode": self._distill_mode,
+            "adaptive_balance": self._adaptive_balance,
+            "epochs": self._epochs if self._epochs is not None else int(self._resolve_attr("epochs", 20) or 20),
             "task_count": self._task_count,
             "has_old_model": self._old_model is not None,
         }
 
-    def _resolve_trainable_module(self, model: Optional[Model] = None) -> Optional[torch.nn.Module]:
-        """
-        Resolve the underlying trainable torch module from nested model wrappers.
-        """
+    def _iter_wrapped(self, model=None):
         current = self._model if model is None else model
         seen = set()
-
         while current is not None and id(current) not in seen:
             seen.add(id(current))
-
-            module = getattr(current, "module", None)
-            if isinstance(module, torch.nn.Module):
-                return module
-
-            module = getattr(current, "model", None)
-            if isinstance(module, torch.nn.Module):
-                return module
-
+            yield current
             current = getattr(current, "model", None)
 
+    def _module(self, model=None, *, required=True):
+        for current in self._iter_wrapped(model):
+            module = current if isinstance(current, nn.Module) else getattr(current, "module", None)
+            if isinstance(module, nn.Module):
+                return module
+        if required:
+            raise TypeError("LwFStrategy requires a PyCLAD autoencoder-like torch `.module`.")
         return None
 
-    def _resolve_model_attr(self, attr_name: str, default, model: Optional[Model] = None):
-        """
-        Resolve an attribute from the wrapper chain or the underlying module.
-        """
-        current = self._model if model is None else model
-        seen = set()
-
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
-
-            if hasattr(current, attr_name):
-                return getattr(current, attr_name)
-
-            module = getattr(current, "module", None)
-            if module is not None and hasattr(module, attr_name):
-                return getattr(module, attr_name)
-
-            current = getattr(current, "model", None)
-
+    def _resolve_attr(self, name, default, model=None):
+        for current in self._iter_wrapped(model):
+            for target in (current, getattr(current, "module", None)):
+                if hasattr(target, name):
+                    return getattr(target, name)
         return default
 
-    def _resolve_batch_size(self) -> int:
-        batch_size = self._resolve_model_attr("batch_size", 32)
-        return int(batch_size) if batch_size else 32
+    def _resolve_shuffle(self) -> bool:
+        models = [*self._iter_wrapped(), self._module()]
+        return not any("TemporalAutoencoder" in model.__class__.__name__ for model in models)
 
-    def _resolve_lr(self) -> float:
-        lr = self._resolve_model_attr("lr", 1e-2)
-        return float(lr) if lr else 1e-2
-
-    def _resolve_epochs(self) -> int:
-        epochs = self._resolve_model_attr("epochs", 20)
-        return int(epochs) if epochs else 20
-
-    def _resolve_device(self, model: Optional[Model] = None) -> torch.device:
-        explicit_device = self._resolve_model_attr("device", None, model)
-        if explicit_device is not None:
-            return torch.device(explicit_device)
-
-        module = self._resolve_trainable_module(model)
-        if module is not None:
-            try:
-                return next(module.parameters()).device
-            except (AttributeError, StopIteration):
-                pass
-
-        return torch.device("cpu")
-
-    def _transform_data_for_model(self, data: np.ndarray, model: Optional[Model] = None) -> np.ndarray:
-        """
-        Apply simple wrapper-specific preprocessing so distillation sees the same input shape as fit().
-        """
-        current = self._model if model is None else model
+    def _prepare_data(self, data):
         transformed = np.asarray(data)
-        seen = set()
-
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
-
-            if current.__class__.__name__ == "FlattenTimeSeriesAdapter":
-                transformed = transformed.reshape(transformed.shape[0], -1)
-
-            current = getattr(current, "model", None)
-
-        return np.array(transformed, copy=True)
-
-    def _supports_latent_distillation(self, model: Optional[Model] = None) -> bool:
-        module = self._resolve_trainable_module(model)
-        if module is None:
-            return False
-
-        return hasattr(module, "encode") or hasattr(module, "encoder")
-
-    @staticmethod
-    def _extract_latent_representation(encoded_output):
-        if isinstance(encoded_output, (tuple, list)):
-            for item in encoded_output:
-                if torch.is_tensor(item):
-                    return item
-        return encoded_output
-
-    def _encode_with_model(self, model: Model, batch: torch.Tensor) -> torch.Tensor:
-        if hasattr(model, "encode_batch"):
-            return self._extract_latent_representation(model.encode_batch(batch))
-
-        module = self._resolve_trainable_module(model)
-        if module is None:
-            raise TypeError("Model does not expose a trainable torch module or encode_batch().")
-
-        if hasattr(module, "encode"):
-            return self._extract_latent_representation(module.encode(batch))
-
-        if hasattr(module, "encoder"):
-            return self._extract_latent_representation(module.encoder(batch))
-
-        raise TypeError("Model does not expose encoder/encode hooks required for latent distillation.")
-
-    def _forward_with_model(
-        self, model: Model, batch: torch.Tensor
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], None]:
-        if hasattr(model, "forward_batch"):
-            return model.forward_batch(batch, apply_masking=False)
-
-        module = self._resolve_trainable_module(model)
-        if module is None:
-            raise TypeError("Model does not expose a trainable torch module or forward_batch().")
-
-        output = module(batch)
-        x_hat = output[0] if isinstance(output, (tuple, list)) else output
-        z = self._encode_with_model(model, batch) if self._supports_latent_distillation(model) else None
-        return x_hat, z, None
-
-    def _training_batch_step(
-        self, batch: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], None]:
-        if hasattr(self._model, "training_batch_step"):
-            return self._model.training_batch_step(batch)
-
-        x_hat, z, _ = self._forward_with_model(self._model, batch)
-        rec_loss = torch.nn.functional.mse_loss(x_hat, batch)
-        return rec_loss, x_hat, z, None
-
-    def _resolve_distill_mode(self) -> str:
-        if self._distill_mode in ["latent", "hybrid"] and not (
-            self._supports_latent_distillation(self._model) and self._supports_latent_distillation(self._old_model)
-        ):
-            logger.warning(
-                "Latent distillation requested, but the model does not expose encoder hooks. "
-                "Falling back to reconstruction distillation."
-            )
-            return "reconstruction"
-
-        return self._distill_mode
+        if any(current.__class__.__name__ == "FlattenTimeSeriesAdapter" for current in self._iter_wrapped()):
+            transformed = transformed.reshape(transformed.shape[0], -1)
+        return torch.from_numpy(np.array(transformed, dtype=np.float32, copy=True))
 
     def _clone_model(self) -> Model:
-        """
-        Create a frozen deep copy of the current model.
-
-        Returns
-        -------
-        Model
-            Frozen copy of the current model
-        """
         cloned = copy.deepcopy(self._model)
-
-        module = self._resolve_trainable_module(cloned)
-        if module is not None:
-            module.eval()
-            for param in module.parameters():
-                param.requires_grad = False
-
+        module = self._module(cloned)
+        module.eval()
+        module.requires_grad_(False)
         return cloned
 
-    def _fit_with_distillation(self, data: np.ndarray) -> None:
-        """
-        Train the model with knowledge distillation from the old model.
+    def _resolve_distill_mode(self) -> str:
+        if self._old_model is None:
+            raise RuntimeError("LwF distillation requires a previous-task teacher.")
+        if self._distill_mode == "reconstruction":
+            return self._distill_mode
+        module = self._module(required=False)
+        old_module = self._module(self._old_model, required=False)
+        if not all(module is not None and hasattr(module, "encoder") for module in (module, old_module)):
+            return "reconstruction"
+        return self._distill_mode
 
-        Parameters
-        ----------
-        data : np.ndarray
-            Training data of shape (n_samples, height, width)
-        """
-        module = self._resolve_trainable_module(self._model)
-        old_module = self._resolve_trainable_module(self._old_model)
-        if module is None or old_module is None:
-            logger.warning(
-                "Model does not expose a trainable torch module required for distillation. "
-                "Falling back to standard fit()."
-            )
-            self._model.fit(data)
-            return
+    @staticmethod
+    def _latent_values(output):
+        if torch.is_tensor(output):
+            return output
+        if isinstance(output, (tuple, list)) and output and all(torch.is_tensor(item) for item in output):
+            return tuple(output)
+        raise TypeError("Latent distillation requires encoder outputs to be tensors.")
 
-        tensor_data = self._prepare_data(data)
-        dataset = TensorDataset(tensor_data)
-        dataloader = DataLoader(dataset, batch_size=self._resolve_batch_size(), shuffle=True, num_workers=0)
+    def _encode_with_model(self, model, batch):
+        module = self._module(model)
+        if not hasattr(module, "encoder"):
+            raise TypeError("Latent distillation requires module.encoder.")
+        return self._latent_values(module.encoder(batch))
 
+    @staticmethod
+    def _is_variational(module) -> bool:
+        return "Variational" in module.__class__.__name__ and hasattr(module, "encoder") and hasattr(module, "decoder")
+
+    def _forward_module(self, module, batch, *, deterministic_variational=False):
+        if deterministic_variational and self._is_variational(module):
+            latent = self._latent_values(module.encoder(batch))
+            mean = latent[0] if isinstance(latent, tuple) else latent
+            extras = latent if isinstance(latent, tuple) else tuple()
+            return module.decoder(mean), extras
+
+        output = module(batch)
+        return (output[0], tuple(output[1:])) if isinstance(output, (tuple, list)) else (output, tuple())
+
+    def _reconstruction_loss(self, module, batch, x_hat, extras):
+        train_loss = getattr(module, "train_loss", None)
+        if callable(train_loss):
+            if len(extras) >= 2:
+                try:
+                    return train_loss(batch, x_hat, *extras[:2])
+                except TypeError:
+                    pass
+            return train_loss(x_hat, batch)
+        return F.mse_loss(x_hat, batch)
+
+    def _training_batch_step(self, batch, *, include_latent=False):
+        module = self._module()
+        x_hat, extras = self._forward_module(module, batch)
+        rec_loss = self._reconstruction_loss(module, batch, x_hat, extras)
+        z = self._encode_with_model(self._model, batch) if include_latent and hasattr(module, "encoder") else None
+        return rec_loss, x_hat, z, extras
+
+    def _compute_distill_loss(self, batch, distill_mode, x_hat_new, z_new):
+        reconstruction_loss = None
+        if distill_mode in {"reconstruction", "hybrid"}:
+            if self._is_variational(self._module()):
+                x_hat_new, _ = self._forward_module(self._module(), batch, deterministic_variational=True)
+            with torch.no_grad():
+                x_hat_old, _ = self._forward_module(
+                    self._module(self._old_model), batch, deterministic_variational=True
+                )
+            reconstruction_loss = F.mse_loss(x_hat_new, x_hat_old)
+            if distill_mode == "reconstruction":
+                return reconstruction_loss
+
+        with torch.no_grad():
+            z_old = self._encode_with_model(self._old_model, batch)
+        new_values = z_new if isinstance(z_new, tuple) else (z_new,)
+        old_values = z_old if isinstance(z_old, tuple) else (z_old,)
+        if len(new_values) != len(old_values) or any(value is None for value in new_values):
+            raise ValueError("Current and teacher latent outputs must have the same structure.")
+        latent_loss = sum(F.mse_loss(current, teacher) for current, teacher in zip(new_values, old_values)) / len(
+            new_values
+        )
+        return latent_loss if distill_mode == "latent" else (latent_loss + reconstruction_loss) / 2
+
+    def _weight_distill_loss(self, rec_loss, distill_loss):
+        if not self._adaptive_balance:
+            return self._alpha * distill_loss
+        distill_value = distill_loss.detach()
+        if torch.all(distill_value <= torch.finfo(distill_value.dtype).eps):
+            return self._alpha * distill_loss
+        scale = rec_loss.detach() / distill_value.clamp_min(torch.finfo(distill_value.dtype).eps)
+        return self._alpha * scale * distill_loss
+
+    def _fit_with_distillation(self, data):
+        if self._old_model is None:
+            raise RuntimeError("LwF distillation requires a previous-task teacher.")
+
+        module = self._module()
+        old_module = self._module(self._old_model)
         distill_mode = self._resolve_distill_mode()
-        device = self._resolve_device(self._model)
+        if (explicit_device := self._resolve_attr("device", None)) is not None:
+            device = torch.device(explicit_device)
+        else:
+            try:
+                device = next(module.parameters()).device
+            except StopIteration:
+                device = torch.device("cpu")
 
         old_module.eval()
-        for param in old_module.parameters():
-            param.requires_grad = False
-
+        old_module.requires_grad_(False)
         old_module.to(device)
         module.to(device)
         module.train()
 
-        optimizer = torch.optim.Adam(module.parameters(), lr=self._resolve_lr())
+        parameters = [parameter for parameter in module.parameters() if parameter.requires_grad]
+        if not parameters:
+            raise TypeError("LwFStrategy requires at least one trainable parameter.")
 
-        for epoch in range(self._resolve_epochs()):
-            epoch_loss = 0.0
-            epoch_rec_loss = 0.0
-            epoch_distill_loss = 0.0
+        optimizer = torch.optim.Adam(parameters, lr=float(self._resolve_attr("lr", 1e-2) or 1e-2))
+        include_latent = distill_mode in {"latent", "hybrid"}
+        dataloader = DataLoader(
+            TensorDataset(self._prepare_data(data)),
+            batch_size=int(self._resolve_attr("batch_size", 32) or 32),
+            shuffle=self._resolve_shuffle(),
+            num_workers=0,
+        )
 
-            for batch_idx, (batch,) in enumerate(dataloader):
+        epochs = self._epochs if self._epochs is not None else int(self._resolve_attr("epochs", 20) or 20)
+        for _ in range(epochs):
+            for (batch,) in dataloader:
                 batch = batch.to(device)
-
-                rec_loss, x_hat_train, z_train, _ = self._training_batch_step(batch)
-                x_hat_new, z_new = x_hat_train, z_train
-
-                with torch.no_grad():
-                    if distill_mode == "latent":
-                        z_old = self._encode_with_model(self._old_model, batch)
-                        distill_loss = torch.nn.functional.mse_loss(z_new, z_old)
-                    elif distill_mode == "reconstruction":
-                        x_hat_old, _, _ = self._forward_with_model(self._old_model, batch)
-                        distill_loss = torch.nn.functional.mse_loss(x_hat_new, x_hat_old)
-                    elif distill_mode == "hybrid":
-                        z_old = self._encode_with_model(self._old_model, batch)
-                        x_hat_old, _, _ = self._forward_with_model(self._old_model, batch)
-                        latent_loss = torch.nn.functional.mse_loss(z_new, z_old)
-                        recon_loss = torch.nn.functional.mse_loss(x_hat_new, x_hat_old)
-                        distill_loss = (latent_loss + recon_loss) / 2
-                    else:
-                        raise ValueError(f"Invalid distill_mode: {distill_mode}")
-
-                total_loss = rec_loss + self._alpha * distill_loss
-
                 optimizer.zero_grad()
+                rec_loss, x_hat_new, z_new, _ = self._training_batch_step(batch, include_latent=include_latent)
+                distill_loss = self._compute_distill_loss(batch, distill_mode, x_hat_new, z_new)
+                total_loss = rec_loss + self._weight_distill_loss(rec_loss, distill_loss)
                 total_loss.backward()
                 optimizer.step()
 
-                epoch_loss += total_loss.item()
-                epoch_rec_loss += rec_loss.item()
-                epoch_distill_loss += distill_loss.item()
-
-            n_batches = len(dataloader)
-            avg_loss = epoch_loss / n_batches
-            avg_rec = epoch_rec_loss / n_batches
-            avg_distill = epoch_distill_loss / n_batches
-
-            epochs = self._resolve_epochs()
-            if (epoch + 1) % max(1, epochs // 5) == 0:
-                logger.info(
-                    f"Epoch {epoch+1}/{epochs}: " f"Loss={avg_loss:.6f} (Rec={avg_rec:.6f}, Distill={avg_distill:.6f})"
-                )
-
         if hasattr(self._model, "_auto_threshold") and self._model._auto_threshold:
             self._model._calibrate_threshold(data)
-
-    def _prepare_data(self, data: np.ndarray) -> torch.Tensor:
-        """
-        Prepare numpy data for PyTorch training.
-
-        Parameters
-        ----------
-        data : np.ndarray
-            Training data of shape (n_samples, height, width)
-
-        Returns
-        -------
-        torch.Tensor
-            Prepared tensor data
-        """
-        transformed = self._transform_data_for_model(data)
-        return torch.tensor(transformed, dtype=torch.float32)
