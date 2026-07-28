@@ -25,19 +25,37 @@ from pyclad.video.features import (
     flatten_video_curves,
     window_scores_to_frame_scores,
 )
-from pyclad.video.metrics import VideoFrameMetrics, compute_video_frame_metrics
+from pyclad.video.metrics import (
+    AveragePrecisionDelay,
+    VideoFrameMetrics,
+    compute_average_precision_delay,
+    compute_video_frame_metrics,
+)
 from pyclad.video.models import (
     CallableVideoAnomalyModel,
     CallableWeaklySupervisedVideoModel,
+    NolaFeatureLayout,
+    NolaVideoModel,
     VideoAnomalyModel,
+    build_nola_trajectory_examples,
+    nola_spatial_object_features,
+    nola_temporal_object_features,
+    non_maximum_suppression,
+    odit_cusum,
+    pack_nola_features,
 )
 from pyclad.video.prediction_results import VideoPredictionResults
 
 __all__ = [
+    "AveragePrecisionDelay",
     "BenchmarkResult",
     "CallableVideoAnomalyModel",
     "CallableWeaklySupervisedVideoModel",
+    "CommandVideoModel",
     "InMemoryVideoFeatureStore",
+    "NolaFeatureLayout",
+    "NolaTrajectoryPredictor",
+    "NolaVideoModel",
     "NpyVideoFeatureStore",
     "PrecomputedVideoDataset",
     "TorchVideoBackbone",
@@ -53,15 +71,22 @@ __all__ = [
     "VideoPredictionResults",
     "VideoStrategySchema",
     "VideoWindow",
+    "build_nola_trajectory_examples",
+    "compute_average_precision_delay",
     "compute_video_frame_metrics",
     "flatten_video_curves",
+    "nola_spatial_object_features",
+    "nola_temporal_object_features",
+    "non_maximum_suppression",
+    "odit_cusum",
+    "pack_nola_features",
     "window_scores_to_frame_scores",
 ]
 
 
 def __getattr__(name):
-    if name == "TorchVideoBackbone":
-        from pyclad.video.models import TorchVideoBackbone
+    if name in {"CommandVideoModel", "NolaTrajectoryPredictor", "TorchVideoBackbone"}:
+        from pyclad.video import models
 
-        return TorchVideoBackbone
+        return getattr(models, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
