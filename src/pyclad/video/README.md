@@ -131,3 +131,56 @@ NOLA is adapted under its MIT license. COMMAND is independently implemented
 from its public paper and architecture because its reference repository does
 not provide a source-code license. Exact provenance is recorded in
 `third_party/PROVENANCE.md`.
+
+## Real datasets and CLI
+
+The COMMAND adapter reads the reference archive directly: `all_rgbs/`,
+`all_flows/`, and its four train/test list files. RGB and flow windows are
+concatenated into 2048-dimensional rows, while weak labels and globally unique
+video bag IDs remain reserved schema columns. Each anomaly class is paired with
+a disjoint, equally sized normal-video shard to form a continual experience.
+
+```shell
+PYTHONPATH=src python -m pyclad.video command \
+  --data-root /path/to/UCF-Crime \
+  --strategy cumulative \
+  --concepts Abuse,Arrest \
+  --videos-per-class 1
+```
+
+Set a numeric limit to `0` to remove it. COMMAND supports `naive`,
+`cumulative`, `mste`, `replay-only`, `replay-enhanced`, `ewc`, `lwf`, `agem`,
+and `der++`.
+
+NOLA's archive includes prepared JSON and tracks for the eleven training
+stages, but its test split contains only MP4s. Prepare test videos once with
+the optional torchvision SSDLite detector and the built-in IoU tracker:
+
+```shell
+PYTHONPATH=src python -m pyclad.video nola-preprocess \
+  --data-root /path/to/NOLA \
+  --output-root /path/to/nola-processed \
+  --video-ids mon_14_1 \
+  --frame-stride 30 \
+  --max-frames 12
+```
+
+Use `--video-ids all` and remove the smoke limits to prepare the complete test
+split.
+
+For a benchmark run, point the stage loader at the extracted NOLA root and the
+test loader at that reusable preprocessing cache:
+
+```shell
+PYTHONPATH=src python -m pyclad.video nola \
+  --data-root /path/to/NOLA \
+  --processed-test-root /path/to/nola-processed \
+  --ground-truth /path/to/gt.txt \
+  --strategy cumulative \
+  --stages M-Train,Train0
+```
+
+NOLA evaluates each test video separately so its ODIT/CUSUM state resets at
+video boundaries. It supports `naive`, `cumulative`, `mste`, `replay-only`,
+and `replay-enhanced`; gradient-regularization methods require a trainable
+`TorchVideoBackbone` such as COMMAND.
