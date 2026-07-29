@@ -42,7 +42,12 @@ export MKL_NUM_THREADS="${LSB_DJOB_NUMPROC:-2}"
 export OPENBLAS_NUM_THREADS="${LSB_DJOB_NUMPROC:-2}"
 export NUMEXPR_NUM_THREADS="${LSB_DJOB_NUMPROC:-2}"
 
+# AU's site profile reads optional interactive-shell variables such as
+# HISTCONTROL. Temporarily disable nounset while loading the module function,
+# then immediately restore strict batch-script handling.
+set +u
 source /etc/profile
+set -u
 module load gcc12/12.2.0
 module load cuda12.3/toolkit/12.3.2
 source "${HPC_ROOT}/env/bin/activate"
