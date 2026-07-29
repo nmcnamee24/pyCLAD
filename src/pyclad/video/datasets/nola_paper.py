@@ -122,6 +122,7 @@ class NolaPaperContinualDataset:
         self,
         root: Union[str, Path],
         *,
+        processed_train_root: Optional[Union[str, Path]] = None,
         trajectory_predictor=None,
         frame_stride: int = 30,
         confidence_threshold: float = 0.6,
@@ -132,6 +133,13 @@ class NolaPaperContinualDataset:
         self.train_root = self.root / "Train"
         if not self.train_root.is_dir():
             raise FileNotFoundError(f"NOLA training directory does not exist: {self.train_root}")
+        self.processed_train_root = (
+            None if processed_train_root is None else Path(processed_train_root).expanduser().resolve()
+        )
+        if self.processed_train_root is not None and not self.processed_train_root.is_dir():
+            raise FileNotFoundError(
+                "NOLA processed training override directory does not exist: " f"{self.processed_train_root}"
+            )
         if frame_stride <= 0:
             raise ValueError("frame_stride must be positive")
         self.trajectory_predictor = trajectory_predictor
@@ -162,7 +170,7 @@ class NolaPaperContinualDataset:
             stage_directories = sorted(path for path in (self.train_root / stage).iterdir() if path.is_dir())
             if max_videos_per_stage is not None:
                 stage_directories = stage_directories[:max_videos_per_stage]
-            directories.extend(stage_directories)
+            directories.extend(self._cache_directory(stage, path) for path in stage_directories)
         return tuple(directories)
 
     def training_concepts(
@@ -181,7 +189,8 @@ class NolaPaperContinualDataset:
             matrices = []
             windows = []
             offset = 0
-            for directory in directories:
+            for source_directory in directories:
+                directory = self._cache_directory(stage, source_directory)
                 matrix, video_windows = extract_nola_paper_video_features(
                     directory,
                     split="train",
@@ -209,6 +218,12 @@ class NolaPaperContinualDataset:
                 )
             )
         return tuple(concepts)
+
+    def _cache_directory(self, stage: str, source_directory: Path) -> Path:
+        if self.processed_train_root is None:
+            return source_directory
+        override = self.processed_train_root / stage / source_directory.name
+        return override if override.is_dir() else source_directory
 
 
 class NolaPaperPreparedTestDataset(PrecomputedVideoDataset):

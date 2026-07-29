@@ -97,6 +97,24 @@ class NolaDatasetTest(unittest.TestCase):
         np.testing.assert_array_equal(context, [2.0, 1.0, 1.0, 0.0, 0.0, 0.0])
         self.assertEqual(concept.features[0, -1], 0.0)
 
+    def test_paper_dataset_uses_stage_video_cache_override_when_present(self):
+        from pyclad.video import NolaPaperContinualDataset
+
+        processed = Path(self.temporary.name) / "processed-train"
+        override = processed / "M-Train" / "mon_4_1"
+        _write_prepared_video(override, frame_count=2)
+
+        dataset = NolaPaperContinualDataset(
+            self.root,
+            processed_train_root=processed,
+            frame_stride=1,
+            stage_order=("M-Train",),
+        )
+        concept = dataset.training_concepts()[0]
+
+        self.assertEqual(concept.features.shape[0], 2)
+        self.assertEqual(dataset.video_directories(), (override.resolve(),))
+
     def test_prepared_test_dataset_uses_nola_ground_truth(self):
         from pyclad.video import NolaPreparedTestDataset
 

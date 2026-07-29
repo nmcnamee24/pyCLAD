@@ -153,7 +153,10 @@ Set a numeric limit to `0` to remove it. COMMAND supports `naive`,
 and `der++`.
 
 NOLA's archive includes prepared JSON and tracks for the eleven training
-stages, but its test split contains only MP4s. The lightweight compatibility
+stages, but its test split contains only MP4s. If a released training cache is
+incomplete, regenerate that video into a separate stage/video tree with
+`nola-preprocess --source-root` and pass it with `--processed-train-root`; the
+source archive is never modified. The lightweight compatibility
 path uses torchvision SSDLite and the built-in IoU tracker:
 
 ```shell
@@ -195,6 +198,7 @@ test loader at that reusable preprocessing cache:
 ```shell
 PYTHONPATH=src python -m pyclad.video nola \
   --data-root /path/to/NOLA \
+  --processed-train-root /path/to/nola-processed-train \
   --processed-test-root /path/to/nola-processed \
   --ground-truth /path/to/gt.txt \
   --implementation paper \

@@ -15,12 +15,15 @@ RUN_ID="${PYCLAD_RUN_ID:?Set PYCLAD_RUN_ID before submitting NOLA scoring}"
 MANIFEST="${HPC_ROOT}/jobs/nola_test_ids.txt"
 RESULT_DIR="${HPC_ROOT}/results/${RUN_ID}"
 PROCESSED_ROOT="${HPC_ROOT}/data/nola/processed-paper"
+PROCESSED_TRAIN_ROOT="${HPC_ROOT}/data/nola/processed-train-paper"
+TRAIN_REPAIR_MANIFEST="${HPC_ROOT}/code/src/pyclad/video/hpc/nola_train_cache_repairs.txt"
 COMMIT_FILE="${HPC_ROOT}/code/PYCLAD_COMMIT_SHA"
 
 test -f "${MANIFEST}"
+test -f "${TRAIN_REPAIR_MANIFEST}"
 test -f "${COMMIT_FILE}"
 test -x "${HPC_ROOT}/env/bin/python"
-mkdir -p "${RESULT_DIR}/nola-cache-validation"
+mkdir -p "${RESULT_DIR}/nola-cache-validation" "${RESULT_DIR}/nola-train-cache-validation"
 
 export PYCLAD_COMMIT_SHA
 PYCLAD_COMMIT_SHA="$(tr -d '[:space:]' < "${COMMIT_FILE}")"
@@ -41,9 +44,21 @@ while IFS= read -r video_id; do
     > "${RESULT_DIR}/nola-cache-validation/${video_id}.json"
 done < "${MANIFEST}"
 
+while IFS=/ read -r stage video_id; do
+  test -n "${stage}"
+  test -n "${video_id}"
+  python -m pyclad.video.hpc.validate_nola_cache \
+    "${PROCESSED_TRAIN_ROOT}/${stage}/${video_id}" \
+    --expected-frame-stride 1 \
+    --expected-detector native-darknet-yolov4-csp \
+    --expected-tracker deep-sort-realtime \
+    > "${RESULT_DIR}/nola-train-cache-validation/${stage}.${video_id}.json"
+done < "${TRAIN_REPAIR_MANIFEST}"
+
 python -m pip freeze > "${RESULT_DIR}/nola.environment.txt"
 python -m pyclad.video nola \
   --data-root "${HPC_ROOT}/data/nola/NOLA" \
+  --processed-train-root "${PROCESSED_TRAIN_ROOT}" \
   --processed-test-root "${PROCESSED_ROOT}" \
   --ground-truth "${HPC_ROOT}/data/nola/gt.txt" \
   --implementation paper \

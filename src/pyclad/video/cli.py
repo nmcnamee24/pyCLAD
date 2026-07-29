@@ -70,8 +70,12 @@ def _parser() -> argparse.ArgumentParser:
     command.add_argument("--device", default=_default_torch_device())
     _add_reproducibility_arguments(command)
 
-    preprocess = commands.add_parser("nola-preprocess", help="detect and track NOLA test MP4s")
+    preprocess = commands.add_parser("nola-preprocess", help="detect and track NOLA MP4s")
     preprocess.add_argument("--data-root", required=True)
+    preprocess.add_argument(
+        "--source-root",
+        help="directory containing video-ID folders; defaults to DATA_ROOT/Test",
+    )
     preprocess.add_argument("--output-root", required=True)
     preprocess.add_argument("--video-ids", required=True)
     preprocess.add_argument("--frame-stride", type=int, default=1)
@@ -107,6 +111,10 @@ def _parser() -> argparse.ArgumentParser:
 
     nola = commands.add_parser("nola", help="run NOLA on staged train data and prepared test data")
     nola.add_argument("--data-root", required=True)
+    nola.add_argument(
+        "--processed-train-root",
+        help="optional stage/video cache overrides for incomplete released training caches",
+    )
     nola.add_argument("--processed-test-root", required=True)
     nola.add_argument("--ground-truth", required=True)
     nola.add_argument("--implementation", choices=("paper", "legacy"), default="paper")
@@ -243,6 +251,11 @@ def _preprocess_nola(arguments: argparse.Namespace) -> None:
     )
 
     data_root = Path(arguments.data_root).expanduser().resolve()
+    source_root = (
+        data_root / "Test" if arguments.source_root is None else Path(arguments.source_root).expanduser().resolve()
+    )
+    if not source_root.is_dir():
+        raise FileNotFoundError(f"NOLA preprocessing source directory does not exist: {source_root}")
     output_root = Path(arguments.output_root).expanduser().resolve()
     if arguments.detector == "darknet":
         missing = [
@@ -314,11 +327,11 @@ def _preprocess_nola(arguments: argparse.Namespace) -> None:
 
     video_ids = _csv(arguments.video_ids)
     if video_ids == ("all",):
-        video_ids = tuple(path.name for path in sorted((data_root / "Test").iterdir()) if path.is_dir())
+        video_ids = tuple(path.name for path in sorted(source_root.iterdir()) if path.is_dir())
     outputs = []
     for video_id in video_ids:
         output = preprocess_nola_video(
-            data_root / "Test" / video_id / "video.mp4",
+            source_root / video_id / "video.mp4",
             output_root / video_id,
             detector,
             frame_stride=arguments.frame_stride,
@@ -369,6 +382,7 @@ def _run_nola(arguments: argparse.Namespace) -> None:
     if arguments.implementation == "paper":
         paper_index = NolaPaperContinualDataset(
             arguments.data_root,
+            processed_train_root=arguments.processed_train_root,
             frame_stride=arguments.frame_stride,
         )
         if not arguments.disable_trajectory:
@@ -400,6 +414,7 @@ def _run_nola(arguments: argparse.Namespace) -> None:
             trajectory_examples = len(path_x)
         continual = NolaPaperContinualDataset(
             arguments.data_root,
+            processed_train_root=arguments.processed_train_root,
             trajectory_predictor=trajectory_predictor,
             frame_stride=arguments.frame_stride,
         )
@@ -497,6 +512,7 @@ def _run_nola_paper_checkpoints(arguments: argparse.Namespace) -> None:
     selected_stages = _csv(arguments.stages)
     paper_index = NolaPaperContinualDataset(
         arguments.data_root,
+        processed_train_root=arguments.processed_train_root,
         frame_stride=arguments.frame_stride,
     )
     unknown = sorted(set(selected_stages) - set(paper_index.stage_order))
@@ -568,6 +584,7 @@ def _run_nola_paper_checkpoints(arguments: argparse.Namespace) -> None:
 
         stage_dataset = NolaPaperContinualDataset(
             arguments.data_root,
+            processed_train_root=arguments.processed_train_root,
             trajectory_predictor=trajectory_predictor,
             frame_stride=arguments.frame_stride,
         )

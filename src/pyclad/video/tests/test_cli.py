@@ -55,8 +55,10 @@ class VideoCliTest(unittest.TestCase):
         self.assertEqual(nola.implementation, "paper")
         self.assertEqual(nola.strategy, "replay-enhanced")
         self.assertEqual(nola.buffer_size, 10_000)
+        self.assertIsNone(nola.processed_train_root)
         self.assertEqual(preprocess.detector, "torchvision")
         self.assertEqual(preprocess.tracker, "simple")
+        self.assertIsNone(preprocess.source_root)
 
     def test_global_seed_reproduces_numpy_values(self):
         from pyclad.video.cli import _set_global_seed
