@@ -305,8 +305,8 @@ class DarknetNolaDetector:
                 raise FileNotFoundError(f"Darknet NOLA asset does not exist: {path}")
         if not 0.0 <= confidence_threshold <= 1.0:
             raise ValueError("confidence_threshold must be between zero and one")
-        if not 0.0 <= nms_threshold <= 1.0:
-            raise ValueError("nms_threshold must be between zero and one")
+        if not np.isclose(nms_threshold, 0.45):
+            raise ValueError("native Darknet detector test fixes NMS at 0.45; " "other values are unsupported")
 
         self._cv2 = cv2
         self._classes = tuple(
@@ -488,8 +488,6 @@ class DarknetCliNolaDetector:
                 str(self.weights_path),
                 "-thresh",
                 str(self.confidence_threshold),
-                "-nms",
-                str(self.nms_threshold),
                 "-ext_output",
                 "-out",
                 str(output_path),

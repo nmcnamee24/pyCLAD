@@ -24,7 +24,8 @@ The wrappers expect:
   `~/pyvad_hpc/tools/darknet/darknet`;
 - YOLOv4-CSP data, cfg, weights, and COCO names under
   `~/pyvad_hpc/data/nola/darknet`;
-- `deep-sort-realtime` installed in `~/pyvad_hpc/env`;
+- `deep-sort-realtime==1.3.2` and `setuptools==80.9.0` installed in
+  `~/pyvad_hpc/env`;
 - 50 sorted NOLA test IDs in `~/pyvad_hpc/jobs/nola_test_ids.txt`.
 
 Result JSON, environment snapshots, cache validations, scheduler logs, and GPU
