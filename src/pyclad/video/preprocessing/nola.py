@@ -210,14 +210,14 @@ def preprocess_nola_video(
     frame_id = 0
     processed_count = 0
     while True:
+        if max_frames is not None and processed_count >= max_frames:
+            break
         success, frame = capture.read()
         if not success:
             break
         frame_id += 1
         if (frame_id - 1) % frame_stride:
             continue
-        if max_frames is not None and processed_count >= max_frames:
-            break
 
         detections = tuple(detector(frame))
         tracked = tracker.update(frame_id, detections)
@@ -273,6 +273,7 @@ def preprocess_nola_video(
             {
                 "source_video": str(source),
                 "source_frame_count": source_frame_count,
+                "decoded_frame_count": frame_id,
                 "source_fps": source_fps,
                 "source_width": width,
                 "source_height": height,

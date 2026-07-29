@@ -402,7 +402,9 @@ def _nola_frame_count(
     if metadata_path.exists():
         with metadata_path.open(encoding="utf-8") as stream:
             metadata = json.load(stream)
-        frame_count = int(metadata.get("source_frame_count", 0))
+        frame_count = int(
+            metadata.get("decoded_frame_count", metadata.get("source_frame_count", 0))
+        )
         if frame_count > 0:
             return frame_count
     if source_video is not None and source_video.exists():

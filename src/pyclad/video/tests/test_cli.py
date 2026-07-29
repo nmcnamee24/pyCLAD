@@ -8,6 +8,7 @@ import io
 import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from unittest import mock
 
@@ -169,6 +170,49 @@ class NolaCacheValidationTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "expected 3"):
                 validate_nola_cache(directory)
+
+    def test_decode_to_eof_verifies_inaccurate_container_frame_count(self):
+        from pyclad.video.hpc.validate_nola_cache import validate_nola_cache
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "video.mp4"
+            source.touch()
+            directory = root / "fri_23_0"
+            directory.mkdir()
+            (directory / "fri_23_0.json").write_text(
+                json.dumps(
+                    [
+                        {"frame_id": 1, "objects": []},
+                        {"frame_id": 2, "objects": []},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            np.save(directory / "tracks.npy", np.empty((0, 4), dtype=object))
+            (directory / "Names.txt").write_text("one\ntwo\n", encoding="utf-8")
+            (directory / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "source_video": str(source),
+                        "source_frame_count": 3,
+                        "processed_frames": 2,
+                        "frame_stride": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch(
+                "pyclad.video.hpc.validate_nola_cache._count_decodable_frames",
+                return_value=2,
+            ):
+                result = validate_nola_cache(directory)
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["source_frame_count"], 3)
+        self.assertEqual(result["decoded_frame_count"], 2)
+        self.assertEqual(result["validation_basis"], "decode_to_eof")
 
 
 if __name__ == "__main__":

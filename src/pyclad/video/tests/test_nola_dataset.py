@@ -91,6 +91,23 @@ class NolaDatasetTest(unittest.TestCase):
         np.testing.assert_array_equal(dataset.frame_labels()["mon_4_1"], [0, 1, 1])
         self.assertEqual(dataset.anomaly_intervals["mon_4_1"], ((1, 3),))
 
+    def test_prepared_test_dataset_prefers_decoded_frame_count(self):
+        from pyclad.video import NolaPreparedTestDataset
+
+        processed = Path(self.temporary.name) / "processed-decoded"
+        video = processed / "mon_4_1"
+        _write_prepared_video(video)
+        (video / "metadata.json").write_text(
+            json.dumps({"source_frame_count": 4, "decoded_frame_count": 3}),
+            encoding="utf-8",
+        )
+        ground_truth = Path(self.temporary.name) / "gt-decoded.txt"
+        ground_truth.write_text("mon_4_1,2,3,-1,-1\n", encoding="utf-8")
+
+        dataset = NolaPreparedTestDataset(processed, ground_truth, frame_stride=1)
+
+        self.assertEqual(len(dataset.frame_labels()["mon_4_1"]), 3)
+
     def test_nola_runner_resets_and_reports_apd(self):
         from pyclad.strategies.baselines.naive import NaiveStrategy
         from pyclad.video import (
@@ -165,6 +182,7 @@ class NolaPreprocessingTest(unittest.TestCase):
             self.assertEqual(len(set(tracks[:, 1])), 1)
             self.assertEqual(len(annotations), 3)
             self.assertEqual(metadata["processed_frames"], 3)
+            self.assertEqual(metadata["decoded_frame_count"], 3)
 
 
 if __name__ == "__main__":
