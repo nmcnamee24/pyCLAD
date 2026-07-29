@@ -249,7 +249,7 @@ class CommandUcfCrimeDataset(VideoDataset):
         windows = []
         row_records = []
         feature_index = 0
-        for record in records:
+        for record_index, record in enumerate(records):
             video_features = self._load_video_features(record)
             frame_ranges = self._frame_ranges(record, len(video_features))
             frame_labels = None if record.frame_count is None else self._frame_labels_for_record(record)
@@ -271,6 +271,7 @@ class CommandUcfCrimeDataset(VideoDataset):
                             "relative_path": record.relative_path,
                             "window_index": window_index,
                             "weak_label": record.weak_label,
+                            "record_index": record_index,
                         },
                     )
                 )

@@ -184,3 +184,16 @@ NOLA evaluates each test video separately so its ODIT/CUSUM state resets at
 video boundaries. It supports `naive`, `cumulative`, `mste`, `replay-only`,
 and `replay-enhanced`; gradient-regularization methods require a trainable
 `TorchVideoBackbone` such as COMMAND.
+
+## Reproducible HPC runs
+
+All three CLI workflows accept `--seed` (default `42`) and `--output-json`.
+Structured result files include the complete arguments, Git commit, UTC
+timestamp, runtime versions, dataset counts, and a validation section that
+lists any non-finite metric paths. COMMAND exposes the research-sized
+`--hidden-dim 128`, `--embedding-dim 128`, and `--memory-size 64` defaults.
+
+AU Lovelace LSF wrappers for the complete COMMAND run, the throttled NOLA
+preprocessing array, and NOLA scoring live in `hpc/`. They keep all generated
+data and logs beneath `~/pyvad_hpc`; see `hpc/README.md` for the required
+remote layout and submission order.

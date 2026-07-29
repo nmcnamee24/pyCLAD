@@ -69,6 +69,10 @@ class CommandUcfCrimeDatasetTest(unittest.TestCase):
         for concept in concepts:
             self.assertEqual(concept.features.shape, (4, 2048))
             self.assertEqual(concept.strategy_matrix().shape, (4, 2050))
+            self.assertEqual(
+                {window.payload["record_index"] for window in concept.windows},
+                {0, 1},
+            )
             np.testing.assert_array_equal(
                 np.sort(np.unique(concept.strategy_targets["weak_label"])),
                 [0.0, 1.0],
