@@ -26,6 +26,8 @@ PYCLAD_COMMIT_SHA="$(tr -d '[:space:]' < "${COMMIT_FILE}")"
 export PYTHONHASHSEED="${PYCLAD_SEED:-42}"
 export OMP_NUM_THREADS="${LSB_DJOB_NUMPROC:-8}"
 export MKL_NUM_THREADS="${LSB_DJOB_NUMPROC:-8}"
+export OPENBLAS_NUM_THREADS="${LSB_DJOB_NUMPROC:-8}"
+export NUMEXPR_NUM_THREADS="${LSB_DJOB_NUMPROC:-8}"
 
 source "${HPC_ROOT}/env/bin/activate"
 while IFS= read -r video_id; do
