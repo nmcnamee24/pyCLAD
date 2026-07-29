@@ -78,44 +78,62 @@ def compute_average_precision_delay(
             raise ValueError("maximum_delay must be positive")
         maximum_delay_value = int(maximum_delay)
 
-    precisions = []
-    delays = []
-    for threshold in threshold_values:
-        true_positives = 0
-        false_positives = 0
-        video_delays = []
+    true_positives = np.zeros(len(threshold_values), dtype=np.int64)
+    false_positives = np.zeros(len(threshold_values), dtype=np.int64)
+    delay_sums = np.zeros(len(threshold_values), dtype=np.float64)
+    for video_id, scores in score_arrays.items():
+        intervals = normalized_intervals.get(video_id, ())
+        if not intervals:
+            false_positives += scores.max() > threshold_values
+            continue
 
-        for video_id, scores in score_arrays.items():
-            intervals = normalized_intervals.get(video_id, ())
-            alarms = np.flatnonzero(scores > threshold)
-            if not intervals:
-                false_positives += int(bool(len(alarms)))
-                continue
+        first_start = intervals[0][0]
+        if first_start:
+            false_positives += scores[:first_start].max() > threshold_values
 
-            first_start = intervals[0][0]
-            false_positives += int(bool(np.any(alarms < first_start)))
-            detections = [int(alarm) for alarm in alarms if any(start <= alarm < stop for start, stop in intervals)]
-            if detections:
-                detection = detections[0]
-                containing_start = next(start for start, stop in intervals if start <= detection < stop)
-                true_positives += 1
-                video_delays.append(min(detection - containing_start, maximum_delay_value))
-            else:
-                video_delays.append(maximum_delay_value)
+        anomaly_mask = np.zeros(len(scores), dtype=bool)
+        anomaly_delays = np.zeros(len(scores), dtype=np.int64)
+        for start, stop in intervals:
+            new_frames = ~anomaly_mask[start:stop]
+            anomaly_delays[start:stop][new_frames] = np.arange(stop - start)[new_frames]
+            anomaly_mask[start:stop] = True
 
-        denominator = true_positives + false_positives
-        precisions.append(true_positives / denominator if denominator else 0.0)
-        delays.append(float(np.mean(video_delays)) / maximum_delay_value)
+        interval_scores = scores[anomaly_mask]
+        interval_delays = anomaly_delays[anomaly_mask]
+        prefix_maxima = np.maximum.accumulate(interval_scores)
+        detection_positions = np.searchsorted(
+            prefix_maxima,
+            threshold_values,
+            side="right",
+        )
+        detected = detection_positions < len(prefix_maxima)
+        true_positives += detected
+        video_delays = np.full(
+            len(threshold_values),
+            maximum_delay_value,
+            dtype=np.float64,
+        )
+        video_delays[detected] = np.minimum(
+            interval_delays[detection_positions[detected]],
+            maximum_delay_value,
+        )
+        delay_sums += video_delays
 
-    delays_array = np.asarray(delays, dtype=np.float64)
-    precisions_array = np.asarray(precisions, dtype=np.float64)
+    denominator = true_positives + false_positives
+    precisions_array = np.divide(
+        true_positives,
+        denominator,
+        out=np.zeros(len(threshold_values), dtype=np.float64),
+        where=denominator != 0,
+    )
+    delays_array = delay_sums / anomaly_video_count / maximum_delay_value
     order = np.argsort(delays_array, kind="stable")
     sorted_delay = delays_array[order]
     sorted_precision = precisions_array[order]
-    unique_delay = np.unique(sorted_delay)
-    envelope = np.array(
-        [sorted_precision[sorted_delay == delay].max() for delay in unique_delay],
-        dtype=np.float64,
+    unique_delay, first_indices = np.unique(sorted_delay, return_index=True)
+    envelope = np.maximum.reduceat(
+        sorted_precision,
+        first_indices,
     )
     score = float(np.trapezoid(envelope, unique_delay)) if len(unique_delay) > 1 else 0.0
 
@@ -134,6 +152,10 @@ def _validate_intervals(
 ) -> Tuple[Tuple[int, int], ...]:
     normalized = tuple(sorted((int(start), int(stop)) for start, stop in intervals))
     for start, stop in normalized:
-        if start < 0 or stop <= start or stop > length:
+        if start < 0 or stop <= start:
             raise ValueError(f"invalid anomaly interval {(start, stop)} for {video_id!r} of length {length}")
-    return normalized
+    return tuple(
+        (start, min(stop, length))
+        for start, stop in normalized
+        if start < length
+    )
