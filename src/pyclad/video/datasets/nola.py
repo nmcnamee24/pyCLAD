@@ -12,7 +12,10 @@ import numpy as np
 from pyclad.video.data import VideoFeatureConcept, VideoStrategySchema, VideoWindow
 from pyclad.video.data.precomputed import PrecomputedVideoDataset
 from pyclad.video.features.store import InMemoryVideoFeatureStore
-from pyclad.video.models.nola.features import NolaFeatureLayout
+from pyclad.video.models.nola.features import (
+    NolaFeatureLayout,
+    canonical_nola_object_name,
+)
 from pyclad.video.models.nola.scoring import non_maximum_suppression
 
 NOLA_STAGE_ORDER = ("M-Train", *(f"Train{index}" for index in range(10)))
@@ -200,10 +203,7 @@ class NolaPreparedTestDataset(PrecomputedVideoDataset):
             trajectory_error_column=None,
         )
         self.ground_truth = ground_truth
-        self.anomaly_intervals = {
-            video_id: ground_truth.intervals.get(video_id, ())
-            for video_id in frame_labels
-        }
+        self.anomaly_intervals = {video_id: ground_truth.intervals.get(video_id, ()) for video_id in frame_labels}
         super().__init__(
             dataset_name=dataset_name,
             feature_store=InMemoryVideoFeatureStore(np.concatenate(features, axis=0)),
@@ -252,7 +252,7 @@ def extract_nola_video_features(
     class_to_index = {name: index for index, name in enumerate(relevant)}
     tracks_by_frame: Dict[int, list[tuple[str, np.ndarray]]] = {}
     for row in tracks:
-        name = str(row[2])
+        name = canonical_nola_object_name(row[2])
         if name not in class_to_index:
             continue
         frame_id = int(row[0])
@@ -280,7 +280,7 @@ def extract_nola_video_features(
             confidence = float(detected.get("confidence", 0.0))
             if confidence <= confidence_threshold:
                 continue
-            name = str(detected.get("name", ""))
+            name = canonical_nola_object_name(detected.get("name", ""))
             if name == "person":
                 person_count += 1
             elif name in class_to_index:
@@ -342,8 +342,7 @@ def load_nola_ground_truth(path: Union[str, Path]) -> NolaGroundTruth:
             if len(values) % 2:
                 raise ValueError(f"NOLA ground-truth row has an unpaired boundary: {raw_line.rstrip()!r}")
             intervals[fields[0]] = tuple(
-                (max(0, values[index] - 1), values[index + 1])
-                for index in range(0, len(values), 2)
+                (max(0, values[index] - 1), values[index + 1]) for index in range(0, len(values), 2)
             )
     return NolaGroundTruth(intervals=intervals)
 
@@ -358,7 +357,7 @@ def _spatial_from_annotations(
     width, height = frame_size
     candidates = []
     for detected in objects:
-        name = str(detected.get("name", ""))
+        name = canonical_nola_object_name(detected.get("name", ""))
         confidence = float(detected.get("confidence", 0.0))
         if name not in class_to_index or confidence <= confidence_threshold:
             continue
@@ -402,9 +401,7 @@ def _nola_frame_count(
     if metadata_path.exists():
         with metadata_path.open(encoding="utf-8") as stream:
             metadata = json.load(stream)
-        frame_count = int(
-            metadata.get("decoded_frame_count", metadata.get("source_frame_count", 0))
-        )
+        frame_count = int(metadata.get("decoded_frame_count", metadata.get("source_frame_count", 0)))
         if frame_count > 0:
             return frame_count
     if source_video is not None and source_video.exists():

@@ -75,6 +75,28 @@ class NolaDatasetTest(unittest.TestCase):
         self.assertEqual(concept.strategy_matrix().shape, (3, 8))
         np.testing.assert_array_equal(concept.features[:, 5:8], [[1, 1, 4]] * 3)
 
+    def test_paper_dataset_adds_class_counts_context_and_trajectory_slot(self):
+        from pyclad.video import (
+            DARKNET_COCO_CLASSES,
+            NOLA_PAPER_FEATURE_DIM,
+            NolaPaperContinualDataset,
+        )
+
+        dataset = NolaPaperContinualDataset(
+            self.root,
+            frame_stride=1,
+            stage_order=("M-Train",),
+        )
+        concept = dataset.training_concepts()[0]
+
+        self.assertEqual(concept.features.shape, (3, NOLA_PAPER_FEATURE_DIM))
+        counts = concept.features[0, 5 : 5 + len(DARKNET_COCO_CLASSES)]
+        self.assertEqual(counts[DARKNET_COCO_CLASSES.index("person")], 1.0)
+        self.assertEqual(counts[DARKNET_COCO_CLASSES.index("car")], 1.0)
+        context = concept.features[0, 5 + len(DARKNET_COCO_CLASSES) : -1]
+        np.testing.assert_array_equal(context, [2.0, 1.0, 1.0, 0.0, 0.0, 0.0])
+        self.assertEqual(concept.features[0, -1], 0.0)
+
     def test_prepared_test_dataset_uses_nola_ground_truth(self):
         from pyclad.video import NolaPreparedTestDataset
 
@@ -148,6 +170,52 @@ class NolaDatasetTest(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("cv2") is not None, "OpenCV is optional")
 class NolaPreprocessingTest(unittest.TestCase):
+    def test_darknet_detector_keeps_zero_based_coco_class_ids(self):
+        from pyclad.video import DarknetNolaDetector
+
+        class FakeDetectionModel:
+            @staticmethod
+            def detect(*_args, **_kwargs):
+                return (
+                    np.asarray([0, 2]),
+                    np.asarray([0.9, 0.8]),
+                    np.asarray([[1, 2, 3, 4], [5, 6, 7, 8]]),
+                )
+
+        detector = DarknetNolaDetector.__new__(DarknetNolaDetector)
+        detector._model = FakeDetectionModel()
+        detector._classes = ("person", "bicycle", "car")
+        detector.confidence_threshold = 0.25
+        detector.nms_threshold = 0.45
+
+        detections = detector(np.zeros((10, 10, 3), dtype=np.uint8))
+
+        self.assertEqual([detection.name for detection in detections], ["person", "car"])
+        self.assertEqual([detection.class_id for detection in detections], [0, 2])
+
+    def test_native_darknet_json_is_converted_to_pixel_boxes(self):
+        from pyclad.video.preprocessing.nola import _darknet_json_detection
+
+        detection = _darknet_json_detection(
+            {
+                "class_id": 0,
+                "name": "person",
+                "confidence": 0.9,
+                "relative_coordinates": {
+                    "center_x": 0.5,
+                    "center_y": 0.5,
+                    "width": 0.25,
+                    "height": 0.5,
+                },
+            },
+            1280,
+            720,
+        )
+
+        self.assertEqual(detection.name, "person")
+        self.assertEqual(detection.class_id, 0)
+        np.testing.assert_allclose(detection.box, [480.0, 180.0, 800.0, 540.0])
+
     def test_video_preprocessing_writes_reusable_detection_and_track_cache(self):
         import cv2
 
@@ -183,6 +251,7 @@ class NolaPreprocessingTest(unittest.TestCase):
             self.assertEqual(len(annotations), 3)
             self.assertEqual(metadata["processed_frames"], 3)
             self.assertEqual(metadata["decoded_frame_count"], 3)
+            self.assertEqual(metadata["tracker"]["name"], "simple-class-aware-iou")
 
 
 if __name__ == "__main__":

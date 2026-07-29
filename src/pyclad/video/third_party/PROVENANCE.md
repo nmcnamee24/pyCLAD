@@ -22,3 +22,14 @@ The `pyclad.video.models.nola` and `pyclad.video.metrics.nola` modules adapt
 the reference implementation into reusable NumPy/scikit-learn components. The
 legacy TensorFlow 1.x trajectory network was reimplemented with optional
 PyTorch. The upstream license notice is included in `NOLA_LICENSE.txt`.
+
+The paper's Table 2 k-DNN/experience-replay implementation is not present in
+the reference repository. `NolaPaperModel` is therefore a clean-room
+implementation of the architecture and training protocol documented in the
+paper: three 20-unit k-DNN hidden layers, a single-layer two-step decision
+LSTM, synthetic distance anomalies, and pyCLAD-owned replay. Paper
+preprocessing invokes a separately installed native AlexeyAB Darknet binary,
+matching the public NOLA preprocessing script, and uses the separately
+installed `deep-sort-realtime` package. An OpenCV-DNN adapter remains available
+for compatibility. No third-party detector code, weights, or DeepSORT source
+are vendored here.

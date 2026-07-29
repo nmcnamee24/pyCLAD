@@ -20,7 +20,15 @@ The wrappers expect:
 - its Git commit in `~/pyvad_hpc/code/PYCLAD_COMMIT_SHA`;
 - COMMAND data under `~/pyvad_hpc/data/command_ucf_crime/UCF-Crime`;
 - NOLA data and ground truth under `~/pyvad_hpc/data/nola`;
+- a GPU-enabled native AlexeyAB Darknet binary at
+  `~/pyvad_hpc/tools/darknet/darknet`;
+- YOLOv4-CSP data, cfg, weights, and COCO names under
+  `~/pyvad_hpc/data/nola/darknet`;
+- `deep-sort-realtime` installed in `~/pyvad_hpc/env`;
 - 50 sorted NOLA test IDs in `~/pyvad_hpc/jobs/nola_test_ids.txt`.
 
 Result JSON, environment snapshots, cache validations, scheduler logs, and GPU
 diagnostics are written below `~/pyvad_hpc/results` and `~/pyvad_hpc/logs`.
+Paper preprocessing is kept separately under
+`~/pyvad_hpc/data/nola/processed-paper`; validation rejects caches that do not
+declare the native YOLOv4-CSP and DeepSORT backends.

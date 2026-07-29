@@ -16,7 +16,6 @@ from typing import Any, Callable, Iterator, Sequence
 
 import numpy as np
 
-
 COMMAND_STRATEGIES = (
     "naive",
     "cumulative",
@@ -78,6 +77,30 @@ def _parser() -> argparse.ArgumentParser:
     preprocess.add_argument("--frame-stride", type=int, default=1)
     preprocess.add_argument("--max-frames", type=int)
     preprocess.add_argument("--confidence-threshold", type=float, default=0.25)
+    preprocess.add_argument(
+        "--detector",
+        choices=("torchvision", "darknet", "darknet-opencv"),
+        default="torchvision",
+    )
+    preprocess.add_argument("--darknet-binary")
+    preprocess.add_argument("--darknet-source-commit")
+    preprocess.add_argument("--darknet-data")
+    preprocess.add_argument("--darknet-config")
+    preprocess.add_argument("--darknet-weights")
+    preprocess.add_argument("--darknet-weights-sha256")
+    preprocess.add_argument("--darknet-names")
+    preprocess.add_argument("--darknet-input-size", type=int, default=512)
+    preprocess.add_argument("--nms-threshold", type=float, default=0.45)
+    preprocess.add_argument(
+        "--tracker",
+        choices=("simple", "deepsort"),
+        default="simple",
+    )
+    preprocess.add_argument("--tracker-max-age", type=int, default=30)
+    preprocess.add_argument("--tracker-n-init", type=int, default=3)
+    preprocess.add_argument("--tracker-max-cosine-distance", type=float, default=0.2)
+    preprocess.add_argument("--tracker-nn-budget", type=int, default=100)
+    preprocess.add_argument("--tracker-embedder", default="mobilenet")
     preprocess.add_argument("--device", default="cpu")
     preprocess.add_argument("--overwrite", action="store_true")
     _add_reproducibility_arguments(preprocess)
@@ -86,16 +109,47 @@ def _parser() -> argparse.ArgumentParser:
     nola.add_argument("--data-root", required=True)
     nola.add_argument("--processed-test-root", required=True)
     nola.add_argument("--ground-truth", required=True)
-    nola.add_argument("--strategy", choices=NOLA_STRATEGIES, default="cumulative")
+    nola.add_argument("--implementation", choices=("paper", "legacy"), default="paper")
+    nola.add_argument("--strategy", choices=NOLA_STRATEGIES, default="replay-enhanced")
     nola.add_argument("--stages", default="M-Train,Train0")
     nola.add_argument("--video-ids")
     nola.add_argument("--frame-stride", type=int, default=30)
     nola.add_argument("--videos-per-stage", type=int, default=2)
     nola.add_argument("--frames-per-video", type=int, default=120)
-    nola.add_argument("--buffer-size", type=int, default=512)
+    nola.add_argument("--buffer-size", type=int, default=10_000)
     nola.add_argument("--neighbors", type=int, default=5)
+    nola.add_argument("--kdnn-epochs", type=int, default=20)
+    nola.add_argument("--decision-epochs", type=int, default=10)
+    nola.add_argument("--model-batch-size", type=int, default=256)
+    nola.add_argument("--learning-rate", type=float, default=1e-3)
+    nola.add_argument("--disable-trajectory", action="store_true")
+    nola.add_argument("--trajectory-epochs", type=int, default=10)
+    nola.add_argument("--trajectory-batch-size", type=int, default=72)
+    nola.add_argument(
+        "--trajectory-max-examples",
+        type=int,
+        default=0,
+        help="deterministically cap path examples; zero keeps every paper-eligible track window",
+    )
+    nola.add_argument("--device", default=_default_torch_device())
     nola.add_argument("--odit", action="store_true")
-    nola.add_argument("--drift", type=float, default=7.0)
+    nola.add_argument(
+        "--drift",
+        type=_auto_or_nonnegative_float,
+        default=None,
+        help="ODIT drift; use 'auto' (default) to calibrate it from nominal training scores",
+    )
+    nola.add_argument("--maximum-delay", type=int, default=9_000)
+    nola.add_argument(
+        "--allow-degenerate-scores",
+        action="store_true",
+        help="do not fail when all final scores are identical (diagnostics only)",
+    )
+    nola.add_argument(
+        "--evaluate-each-stage",
+        action="store_true",
+        help="report the initial checkpoint and CL-1 through CL-10",
+    )
     _add_reproducibility_arguments(nola)
     return parser
 
@@ -149,11 +203,7 @@ def _run_command(arguments: argparse.Namespace) -> None:
         prediction = strategy.predict(test.features)
 
     selected_ids = {window.video_id for window in test.windows}
-    labels = {
-        video_id: values
-        for video_id, values in dataset.frame_labels().items()
-        if video_id in selected_ids
-    }
+    labels = {video_id: values for video_id, values in dataset.frame_labels().items() if video_id in selected_ids}
     frame_scores = window_scores_to_frame_scores(
         test.windows,
         prediction.anomaly_scores,
@@ -183,21 +233,88 @@ def _run_command(arguments: argparse.Namespace) -> None:
 
 
 def _preprocess_nola(arguments: argparse.Namespace) -> None:
-    from pyclad.video import TorchvisionNolaDetector, preprocess_nola_video
+    from pyclad.video import (
+        DarknetCliNolaDetector,
+        DarknetNolaDetector,
+        DeepSortNolaTracker,
+        SimpleIouTracker,
+        TorchvisionNolaDetector,
+        preprocess_nola_video,
+    )
 
     data_root = Path(arguments.data_root).expanduser().resolve()
     output_root = Path(arguments.output_root).expanduser().resolve()
-    detector = TorchvisionNolaDetector(
-        confidence_threshold=arguments.confidence_threshold,
-        device=arguments.device,
-    )
+    if arguments.detector == "darknet":
+        missing = [
+            flag
+            for flag, value in (
+                ("--darknet-binary", arguments.darknet_binary),
+                ("--darknet-data", arguments.darknet_data),
+                ("--darknet-config", arguments.darknet_config),
+                ("--darknet-weights", arguments.darknet_weights),
+                ("--darknet-names", arguments.darknet_names),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError("Darknet preprocessing requires " + ", ".join(missing))
+        detector = DarknetCliNolaDetector(
+            arguments.darknet_binary,
+            arguments.darknet_data,
+            arguments.darknet_config,
+            arguments.darknet_weights,
+            arguments.darknet_names,
+            confidence_threshold=arguments.confidence_threshold,
+            nms_threshold=arguments.nms_threshold,
+            source_commit=arguments.darknet_source_commit,
+            weights_sha256=arguments.darknet_weights_sha256,
+        )
+    elif arguments.detector == "darknet-opencv":
+        missing = [
+            flag
+            for flag, value in (
+                ("--darknet-config", arguments.darknet_config),
+                ("--darknet-weights", arguments.darknet_weights),
+                ("--darknet-names", arguments.darknet_names),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError("OpenCV Darknet preprocessing requires " + ", ".join(missing))
+        detector = DarknetNolaDetector(
+            arguments.darknet_config,
+            arguments.darknet_weights,
+            arguments.darknet_names,
+            confidence_threshold=arguments.confidence_threshold,
+            nms_threshold=arguments.nms_threshold,
+            input_size=(arguments.darknet_input_size, arguments.darknet_input_size),
+            device=arguments.device,
+        )
+    else:
+        detector = TorchvisionNolaDetector(
+            confidence_threshold=arguments.confidence_threshold,
+            device=arguments.device,
+        )
+    if arguments.tracker == "deepsort":
+
+        def tracker_factory():
+            return DeepSortNolaTracker(
+                max_age=arguments.tracker_max_age,
+                n_init=arguments.tracker_n_init,
+                max_cosine_distance=arguments.tracker_max_cosine_distance,
+                nn_budget=arguments.tracker_nn_budget,
+                embedder=arguments.tracker_embedder,
+                embedder_gpu=arguments.device == "cuda",
+            )
+
+    else:
+
+        def tracker_factory():
+            return SimpleIouTracker(max_age=arguments.tracker_max_age)
+
     video_ids = _csv(arguments.video_ids)
     if video_ids == ("all",):
-        video_ids = tuple(
-            path.name
-            for path in sorted((data_root / "Test").iterdir())
-            if path.is_dir()
-        )
+        video_ids = tuple(path.name for path in sorted((data_root / "Test").iterdir()) if path.is_dir())
     outputs = []
     for video_id in video_ids:
         output = preprocess_nola_video(
@@ -206,6 +323,7 @@ def _preprocess_nola(arguments: argparse.Namespace) -> None:
             detector,
             frame_stride=arguments.frame_stride,
             max_frames=arguments.max_frames,
+            tracker=tracker_factory(),
             overwrite=arguments.overwrite,
         )
         metadata_path = output / "metadata.json"
@@ -229,32 +347,97 @@ def _preprocess_nola(arguments: argparse.Namespace) -> None:
 
 
 def _run_nola(arguments: argparse.Namespace) -> None:
+    if arguments.implementation == "paper" and arguments.evaluate_each_stage:
+        _run_nola_paper_checkpoints(arguments)
+        return
+
     from pyclad.video import (
         NolaBenchmarkRunner,
         NolaContinualDataset,
+        NolaPaperContinualDataset,
+        NolaPaperModel,
+        NolaPaperPreparedTestDataset,
         NolaPreparedTestDataset,
+        NolaTrajectoryPredictor,
         NolaVideoModel,
+        build_nola_paper_trajectory_training_data,
     )
 
-    continual = NolaContinualDataset(
-        arguments.data_root,
-        frame_stride=arguments.frame_stride,
-    )
+    selected_stages = _csv(arguments.stages)
+    trajectory_predictor = None
+    trajectory_examples = 0
+    if arguments.implementation == "paper":
+        paper_index = NolaPaperContinualDataset(
+            arguments.data_root,
+            frame_stride=arguments.frame_stride,
+        )
+        if not arguments.disable_trajectory:
+            path_x, path_y = build_nola_paper_trajectory_training_data(
+                paper_index.video_directories(
+                    selected_stages,
+                    _limit(arguments.videos_per_stage),
+                )
+            )
+            if not len(path_x):
+                raise ValueError("NOLA paper mode found no trajectory examples from tracks lasting at least 50 frames")
+            if arguments.trajectory_max_examples > 0 and len(path_x) > arguments.trajectory_max_examples:
+                selected_indices = np.random.default_rng(arguments.seed).choice(
+                    len(path_x),
+                    size=arguments.trajectory_max_examples,
+                    replace=False,
+                )
+                selected_indices.sort()
+                path_x = path_x[selected_indices]
+                path_y = path_y[selected_indices]
+            trajectory_predictor = NolaTrajectoryPredictor(
+                hidden_dim=20,
+                layers=3,
+                epochs=arguments.trajectory_epochs,
+                batch_size=arguments.trajectory_batch_size,
+                learning_rate=arguments.learning_rate,
+                device=arguments.device,
+            ).fit(path_x, path_y)
+            trajectory_examples = len(path_x)
+        continual = NolaPaperContinualDataset(
+            arguments.data_root,
+            trajectory_predictor=trajectory_predictor,
+            frame_stride=arguments.frame_stride,
+        )
+    else:
+        continual = NolaContinualDataset(
+            arguments.data_root,
+            frame_stride=arguments.frame_stride,
+        )
     concepts = continual.training_concepts(
-        stages=_csv(arguments.stages),
+        stages=selected_stages,
         max_videos_per_stage=_limit(arguments.videos_per_stage),
         max_frames_per_video=_limit(arguments.frames_per_video),
     )
-    test = NolaPreparedTestDataset(
+    test_dataset = NolaPaperPreparedTestDataset if arguments.implementation == "paper" else NolaPreparedTestDataset
+    test = test_dataset(
         arguments.processed_test_root,
         arguments.ground_truth,
         source_test_root=Path(arguments.data_root) / "Test",
         video_ids=None if arguments.video_ids is None else _csv(arguments.video_ids),
+        **({"trajectory_predictor": trajectory_predictor} if arguments.implementation == "paper" else {}),
     )
 
     def model():
+        if arguments.implementation == "paper":
+            return NolaPaperModel(
+                continual.feature_dim,
+                strategy_schema=continual.strategy_schema,
+                neighbors=arguments.neighbors,
+                kdnn_epochs=arguments.kdnn_epochs,
+                decision_epochs=arguments.decision_epochs,
+                batch_size=arguments.model_batch_size,
+                learning_rate=arguments.learning_rate,
+                seed=arguments.seed,
+                device=arguments.device,
+            )
         return NolaVideoModel(
             layout=continual.layout,
+            strategy_schema=continual.strategy_schema,
             neighbors=arguments.neighbors,
             apply_odit=arguments.odit,
             drift=arguments.drift,
@@ -268,12 +451,12 @@ def _run_nola(arguments: argparse.Namespace) -> None:
     learn_kwargs = {}
     predict_kwargs = {}
     if arguments.strategy == "mste":
-        learn_kwargs = {
-            concept.name: {"concept_id": concept.name}
-            for concept in concepts
-        }
+        learn_kwargs = {concept.name: {"concept_id": concept.name} for concept in concepts}
         predict_kwargs = {"concept_id": concepts[-1].name}
-    result = NolaBenchmarkRunner().run(
+    result = NolaBenchmarkRunner(
+        maximum_delay=arguments.maximum_delay,
+        reject_degenerate_scores=not arguments.allow_degenerate_scores,
+    ).run(
         test,
         strategy,
         train_concepts=concepts,
@@ -283,14 +466,179 @@ def _run_nola(arguments: argparse.Namespace) -> None:
     _emit_json(
         {
             "method": "NOLA",
+            "implementation": arguments.implementation,
             "strategy": result.strategy_name,
             "train_stages": [concept.name for concept in concepts],
             "train_videos": _training_video_records(concepts),
             "train_unique_video_ids": _unique_training_video_ids(concepts),
             "train_rows": sum(len(concept.features) for concept in concepts),
             "test_videos": len(result.frame_scores),
+            "trajectory_examples": trajectory_examples,
+            "trajectory_model": (None if trajectory_predictor is None else trajectory_predictor.additional_info()),
             "frame_metrics": result.frame_metrics.as_dict(),
             "APD": result.average_precision_delay.score,
+            "score_diagnostics": result.score_diagnostics.as_dict(),
+            "model": _nola_model_info(strategy),
+        },
+        arguments,
+    )
+
+
+def _run_nola_paper_checkpoints(arguments: argparse.Namespace) -> None:
+    from pyclad.video import (
+        NolaBenchmarkRunner,
+        NolaPaperContinualDataset,
+        NolaPaperModel,
+        NolaPaperPreparedTestDataset,
+        NolaTrajectoryPredictor,
+        build_nola_paper_trajectory_training_data,
+    )
+
+    selected_stages = _csv(arguments.stages)
+    paper_index = NolaPaperContinualDataset(
+        arguments.data_root,
+        frame_stride=arguments.frame_stride,
+    )
+    unknown = sorted(set(selected_stages) - set(paper_index.stage_order))
+    if unknown:
+        raise ValueError(f"unknown NOLA paper stages: {unknown}")
+
+    trajectory_predictor = None
+    if not arguments.disable_trajectory:
+        trajectory_predictor = NolaTrajectoryPredictor(
+            hidden_dim=20,
+            layers=3,
+            epochs=arguments.trajectory_epochs,
+            batch_size=arguments.trajectory_batch_size,
+            learning_rate=arguments.learning_rate,
+            device=arguments.device,
+        )
+
+    def model():
+        return NolaPaperModel(
+            paper_index.feature_dim,
+            strategy_schema=paper_index.strategy_schema,
+            neighbors=arguments.neighbors,
+            kdnn_epochs=arguments.kdnn_epochs,
+            decision_epochs=arguments.decision_epochs,
+            batch_size=arguments.model_batch_size,
+            learning_rate=arguments.learning_rate,
+            seed=arguments.seed,
+            device=arguments.device,
+        )
+
+    strategy = _nola_strategy(
+        arguments.strategy,
+        model,
+        buffer_size=arguments.buffer_size,
+    )
+    benchmark = NolaBenchmarkRunner(
+        maximum_delay=arguments.maximum_delay,
+        reject_degenerate_scores=False,
+    )
+    checkpoint_payloads = []
+    total_trajectory_examples = 0
+    all_concepts = []
+    final_result = None
+    final_test = None
+
+    for stage_index, stage in enumerate(selected_stages):
+        stage_directories = paper_index.video_directories(
+            (stage,),
+            _limit(arguments.videos_per_stage),
+        )
+        stage_trajectory_examples = 0
+        if trajectory_predictor is not None:
+            path_x, path_y = build_nola_paper_trajectory_training_data(stage_directories)
+            if not len(path_x):
+                raise ValueError(f"NOLA paper stage {stage!r} contains no eligible trajectory examples")
+            if arguments.trajectory_max_examples > 0 and len(path_x) > arguments.trajectory_max_examples:
+                stage_rng = np.random.default_rng(arguments.seed + stage_index)
+                selected_indices = stage_rng.choice(
+                    len(path_x),
+                    size=arguments.trajectory_max_examples,
+                    replace=False,
+                )
+                selected_indices.sort()
+                path_x = path_x[selected_indices]
+                path_y = path_y[selected_indices]
+            trajectory_predictor.fit(path_x, path_y)
+            stage_trajectory_examples = len(path_x)
+            total_trajectory_examples += stage_trajectory_examples
+
+        stage_dataset = NolaPaperContinualDataset(
+            arguments.data_root,
+            trajectory_predictor=trajectory_predictor,
+            frame_stride=arguments.frame_stride,
+        )
+        concept = stage_dataset.training_concepts(
+            stages=(stage,),
+            max_videos_per_stage=_limit(arguments.videos_per_stage),
+            max_frames_per_video=_limit(arguments.frames_per_video),
+        )[0]
+        all_concepts.append(concept)
+        if arguments.strategy == "mste":
+            strategy.learn(concept.strategy_matrix(), concept_id=concept.name)
+            predict_kwargs = {"concept_id": concept.name}
+        else:
+            strategy.learn(concept.strategy_matrix())
+            predict_kwargs = {}
+
+        test = NolaPaperPreparedTestDataset(
+            arguments.processed_test_root,
+            arguments.ground_truth,
+            source_test_root=Path(arguments.data_root) / "Test",
+            video_ids=None if arguments.video_ids is None else _csv(arguments.video_ids),
+            trajectory_predictor=trajectory_predictor,
+        )
+        result = benchmark.run(
+            test,
+            strategy,
+            predict_kwargs=predict_kwargs,
+        )
+        checkpoint_name = "initial" if stage_index == 0 else f"CL-{stage_index}"
+        checkpoint_payloads.append(
+            {
+                "checkpoint": checkpoint_name,
+                "stage": stage,
+                "train_rows_this_stage": len(concept.features),
+                "train_rows_seen": sum(len(item.features) for item in all_concepts),
+                "trajectory_examples_this_stage": stage_trajectory_examples,
+                "frame_metrics": result.frame_metrics.as_dict(),
+                "APD": result.average_precision_delay.score,
+                "score_diagnostics": result.score_diagnostics.as_dict(),
+                "model": _nola_model_info(strategy),
+            }
+        )
+        final_result = result
+        final_test = test
+
+    if final_result is None or final_test is None:
+        raise ValueError("NOLA paper checkpoint run selected no stages")
+    if not arguments.allow_degenerate_scores:
+        from pyclad.video import require_non_degenerate_nola_scores
+
+        require_non_degenerate_nola_scores(
+            np.concatenate([final_result.frame_scores[video_id] for video_id in sorted(final_result.frame_scores)])
+        )
+
+    _emit_json(
+        {
+            "method": "NOLA",
+            "implementation": "paper",
+            "strategy": final_result.strategy_name,
+            "train_stages": [concept.name for concept in all_concepts],
+            "train_videos": _training_video_records(all_concepts),
+            "train_unique_video_ids": _unique_training_video_ids(all_concepts),
+            "train_rows": sum(len(concept.features) for concept in all_concepts),
+            "test_videos": len(final_result.frame_scores),
+            "trajectory_examples": total_trajectory_examples,
+            "trajectory_model": (None if trajectory_predictor is None else trajectory_predictor.additional_info()),
+            "frame_metrics": final_result.frame_metrics.as_dict(),
+            "APD": final_result.average_precision_delay.score,
+            "score_diagnostics": final_result.score_diagnostics.as_dict(),
+            "model": _nola_model_info(strategy),
+            "checkpoints": checkpoint_payloads,
         },
         arguments,
     )
@@ -312,9 +660,14 @@ def _command_strategy(
     from pyclad.strategies.regularization.ewc import EWCStrategy
     from pyclad.strategies.regularization.lwf import LwFStrategy
     from pyclad.strategies.replay.agem import AGEMStrategy
-    from pyclad.strategies.replay.buffers.adaptive_balanced import AdaptiveBalancedReplayBuffer
+    from pyclad.strategies.replay.buffers.adaptive_balanced import (
+        AdaptiveBalancedReplayBuffer,
+    )
     from pyclad.strategies.replay.buffers.reservoir import ReservoirBuffer
-    from pyclad.strategies.replay.replay import ReplayEnhancedStrategy, ReplayOnlyStrategy
+    from pyclad.strategies.replay.replay import (
+        ReplayEnhancedStrategy,
+        ReplayOnlyStrategy,
+    )
     from pyclad.strategies.replay.selection.random import RandomSelection
 
     if name == "naive":
@@ -369,8 +722,13 @@ def _nola_strategy(
     from pyclad.strategies.baselines.cumulative import CumulativeStrategy
     from pyclad.strategies.baselines.mste import MSTE
     from pyclad.strategies.baselines.naive import NaiveStrategy
-    from pyclad.strategies.replay.buffers.adaptive_balanced import AdaptiveBalancedReplayBuffer
-    from pyclad.strategies.replay.replay import ReplayEnhancedStrategy, ReplayOnlyStrategy
+    from pyclad.strategies.replay.buffers.adaptive_balanced import (
+        AdaptiveBalancedReplayBuffer,
+    )
+    from pyclad.strategies.replay.replay import (
+        ReplayEnhancedStrategy,
+        ReplayOnlyStrategy,
+    )
     from pyclad.strategies.replay.selection.random import RandomSelection
 
     if name == "naive":
@@ -412,24 +770,12 @@ def _limit(value: int) -> int | None:
 
 def _training_video_records(concepts: Sequence[Any]) -> int:
     return sum(
-        len(
-            {
-                window.payload.get("record_index", window.video_id)
-                for window in concept.windows
-            }
-        )
-        for concept in concepts
+        len({window.payload.get("record_index", window.video_id) for window in concept.windows}) for concept in concepts
     )
 
 
 def _unique_training_video_ids(concepts: Sequence[Any]) -> int:
-    return len(
-        {
-            window.video_id
-            for concept in concepts
-            for window in concept.windows
-        }
-    )
+    return len({window.video_id for concept in concepts for window in concept.windows})
 
 
 def _add_reproducibility_arguments(parser: argparse.ArgumentParser) -> None:
@@ -446,6 +792,24 @@ def _nonnegative_int(value: str) -> int:
     if integer < 0:
         raise argparse.ArgumentTypeError("value must be non-negative")
     return integer
+
+
+def _auto_or_nonnegative_float(value: str) -> float | None:
+    if value.strip().lower() == "auto":
+        return None
+    number = float(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative or 'auto'")
+    return number
+
+
+def _nola_model_info(strategy: Any) -> dict[str, Any]:
+    model = getattr(strategy, "_model", None)
+    if model is not None and hasattr(model, "additional_info"):
+        return dict(model.additional_info())
+    if hasattr(strategy, "additional_info"):
+        return dict(strategy.additional_info())
+    return {}
 
 
 def _set_global_seed(seed: int) -> None:
@@ -493,10 +857,7 @@ def _emit_json(payload: dict, arguments: argparse.Namespace) -> None:
 
 
 def _argument_payload(arguments: argparse.Namespace) -> dict[str, Any]:
-    return {
-        name: str(value) if isinstance(value, Path) else value
-        for name, value in sorted(vars(arguments).items())
-    }
+    return {name: str(value) if isinstance(value, Path) else value for name, value in sorted(vars(arguments).items())}
 
 
 def _commit_sha() -> str | None:

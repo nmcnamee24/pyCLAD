@@ -153,8 +153,8 @@ Set a numeric limit to `0` to remove it. COMMAND supports `naive`,
 and `der++`.
 
 NOLA's archive includes prepared JSON and tracks for the eleven training
-stages, but its test split contains only MP4s. Prepare test videos once with
-the optional torchvision SSDLite detector and the built-in IoU tracker:
+stages, but its test split contains only MP4s. The lightweight compatibility
+path uses torchvision SSDLite and the built-in IoU tracker:
 
 ```shell
 PYTHONPATH=src python -m pyclad.video nola-preprocess \
@@ -168,6 +168,27 @@ PYTHONPATH=src python -m pyclad.video nola-preprocess \
 Use `--video-ids all` and remove the smoke limits to prepare the complete test
 split.
 
+For the paper protocol, preprocess every test frame with the paper's
+YOLOv4-CSP detector family and DeepSORT tracker. The maintained DeepSORT
+adapter requires the optional `deep-sort-realtime` package:
+
+```shell
+python -m pip install deep-sort-realtime
+PYTHONPATH=src python -m pyclad.video nola-preprocess \
+  --data-root /path/to/NOLA \
+  --output-root /path/to/nola-processed-paper \
+  --video-ids all \
+  --frame-stride 1 \
+  --confidence-threshold 0.25 \
+  --detector darknet \
+  --darknet-binary /path/to/darknet \
+  --darknet-data /path/to/coco.data \
+  --darknet-config /path/to/yolov4-csp.cfg \
+  --darknet-weights /path/to/yolov4-csp.weights \
+  --darknet-names /path/to/coco.names \
+  --tracker deepsort
+```
+
 For a benchmark run, point the stage loader at the extracted NOLA root and the
 test loader at that reusable preprocessing cache:
 
@@ -176,14 +197,27 @@ PYTHONPATH=src python -m pyclad.video nola \
   --data-root /path/to/NOLA \
   --processed-test-root /path/to/nola-processed \
   --ground-truth /path/to/gt.txt \
-  --strategy cumulative \
-  --stages M-Train,Train0
+  --implementation paper \
+  --strategy replay-enhanced \
+  --evaluate-each-stage \
+  --stages M-Train,Train0,Train1,Train2,Train3,Train4,Train5,Train6,Train7,Train8,Train9
 ```
 
 NOLA evaluates each test video separately so its ODIT/CUSUM state resets at
-video boundaries. It supports `naive`, `cumulative`, `mste`, `replay-only`,
-and `replay-enhanced`; gradient-regularization methods require a trainable
-`TorchVideoBackbone` such as COMMAND.
+video boundaries in legacy mode. Paper mode uses the documented three-layer
+k-DNN, two-step decision LSTM, three-layer trajectory LSTM, contextual object
+features, and replay without applying the legacy fixed-drift ODIT transform.
+It reports the initial model and CL-1 through CL-10 and fails if final anomaly
+scores collapse to one value. NOLA supports `naive`, `cumulative`, `mste`,
+`replay-only`, and `replay-enhanced`; gradient-regularization methods require
+a trainable `TorchVideoBackbone` such as COMMAND.
+
+The publication does not release its k-DNN/replay source, learned detector or
+tracker checkpoints, exact time-bin boundaries, replay schedule, or
+stage-specific thresholds/epoch counts. This implementation records all such
+choices in result metadata and follows the architecture stated in the paper;
+exact reproduction of Table 2 therefore remains contingent on unavailable
+author artifacts.
 
 ## Reproducible HPC runs
 

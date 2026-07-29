@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #BSUB -J pyclad-nola-score
 #BSUB -q normal
-#BSUB -n 8
-#BSUB -R "rusage[mem=8192]"
+#BSUB -gpu "num=1:gmodel=NVIDIAL40"
+#BSUB -n 4
+#BSUB -R "rusage[mem=32768]"
 #BSUB -W 48:00
 #BSUB -o pyvad_hpc/logs/nola-score.%J.out
 #BSUB -e pyvad_hpc/logs/nola-score.%J.err
@@ -13,7 +14,7 @@ HPC_ROOT="${PYVAD_HPC_ROOT:-${HOME}/pyvad_hpc}"
 RUN_ID="${PYCLAD_RUN_ID:?Set PYCLAD_RUN_ID before submitting NOLA scoring}"
 MANIFEST="${HPC_ROOT}/jobs/nola_test_ids.txt"
 RESULT_DIR="${HPC_ROOT}/results/${RUN_ID}"
-PROCESSED_ROOT="${HPC_ROOT}/data/nola/processed"
+PROCESSED_ROOT="${HPC_ROOT}/data/nola/processed-paper"
 COMMIT_FILE="${HPC_ROOT}/code/PYCLAD_COMMIT_SHA"
 
 test -f "${MANIFEST}"
@@ -35,6 +36,8 @@ while IFS= read -r video_id; do
   python -m pyclad.video.hpc.validate_nola_cache \
     "${PROCESSED_ROOT}/${video_id}" \
     --expected-frame-stride 1 \
+    --expected-detector native-darknet-yolov4-csp \
+    --expected-tracker deep-sort-realtime \
     > "${RESULT_DIR}/nola-cache-validation/${video_id}.json"
 done < "${MANIFEST}"
 
@@ -43,13 +46,21 @@ python -m pyclad.video nola \
   --data-root "${HPC_ROOT}/data/nola/NOLA" \
   --processed-test-root "${PROCESSED_ROOT}" \
   --ground-truth "${HPC_ROOT}/data/nola/gt.txt" \
-  --strategy cumulative \
+  --implementation paper \
+  --strategy replay-enhanced \
+  --evaluate-each-stage \
   --stages M-Train,Train0,Train1,Train2,Train3,Train4,Train5,Train6,Train7,Train8,Train9 \
   --frame-stride 30 \
   --videos-per-stage 0 \
   --frames-per-video 0 \
   --neighbors 5 \
-  --odit \
-  --drift 7 \
+  --buffer-size 10000 \
+  --kdnn-epochs 20 \
+  --decision-epochs 10 \
+  --model-batch-size 256 \
+  --trajectory-epochs 10 \
+  --trajectory-batch-size 72 \
+  --trajectory-max-examples 0 \
+  --device cuda \
   --seed "${PYCLAD_SEED:-42}" \
   --output-json "${RESULT_DIR}/nola.json"

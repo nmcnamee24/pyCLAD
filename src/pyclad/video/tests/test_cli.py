@@ -8,7 +8,6 @@ import io
 import json
 import tempfile
 import unittest
-from unittest import mock
 from pathlib import Path
 from unittest import mock
 
@@ -26,6 +25,38 @@ class VideoCliTest(unittest.TestCase):
         self.assertEqual(arguments.memory_size, 64)
         self.assertEqual(arguments.seed, 42)
         self.assertIsNone(arguments.output_json)
+
+    def test_nola_paper_and_preprocessing_defaults_are_explicit(self):
+        from pyclad.video.cli import _parser
+
+        nola = _parser().parse_args(
+            [
+                "nola",
+                "--data-root",
+                "/tmp/nola",
+                "--processed-test-root",
+                "/tmp/processed",
+                "--ground-truth",
+                "/tmp/gt.txt",
+            ]
+        )
+        preprocess = _parser().parse_args(
+            [
+                "nola-preprocess",
+                "--data-root",
+                "/tmp/nola",
+                "--output-root",
+                "/tmp/processed",
+                "--video-ids",
+                "mon_4_1",
+            ]
+        )
+
+        self.assertEqual(nola.implementation, "paper")
+        self.assertEqual(nola.strategy, "replay-enhanced")
+        self.assertEqual(nola.buffer_size, 10_000)
+        self.assertEqual(preprocess.detector, "torchvision")
+        self.assertEqual(preprocess.tracker, "simple")
 
     def test_global_seed_reproduces_numpy_values(self):
         from pyclad.video.cli import _set_global_seed
@@ -170,6 +201,39 @@ class NolaCacheValidationTest(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "expected 3"):
                 validate_nola_cache(directory)
+
+    def test_paper_cache_backend_metadata_is_enforced(self):
+        from pyclad.video.hpc.validate_nola_cache import validate_nola_cache
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary) / "mon_4_1"
+            directory.mkdir()
+            (directory / "mon_4_1.json").write_text(
+                json.dumps([{"frame_id": 1, "objects": []}]),
+                encoding="utf-8",
+            )
+            np.save(directory / "tracks.npy", np.empty((0, 4), dtype=object))
+            (directory / "Names.txt").write_text("one\n", encoding="utf-8")
+            (directory / "metadata.json").write_text(
+                json.dumps(
+                    {
+                        "source_frame_count": 1,
+                        "decoded_frame_count": 1,
+                        "processed_frames": 1,
+                        "frame_stride": 1,
+                        "detector": {"name": "torchvision-ssdlite320-mobilenet-v3-large"},
+                        "tracker": {"name": "simple-class-aware-iou"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "expected 'darknet-yolov4-csp'"):
+                validate_nola_cache(
+                    directory,
+                    expected_detector="darknet-yolov4-csp",
+                    expected_tracker="deep-sort-realtime",
+                )
 
     def test_decode_to_eof_verifies_inaccurate_container_frame_count(self):
         from pyclad.video.hpc.validate_nola_cache import validate_nola_cache

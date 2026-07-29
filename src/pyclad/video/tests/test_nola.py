@@ -75,6 +75,11 @@ class NolaVideoModelTest(unittest.TestCase):
             ["car", "truck"],
         )
         self.assertEqual(spatial.shape, (2, 5))
+        aliased = nola_spatial_object_features(
+            [[0, 0, 10, 10], [5, 5, 12, 12]],
+            ["bicycle", "motorbike"],
+        )
+        np.testing.assert_array_equal(aliased[:, -1], [1.0, 1.0])
 
         track = np.arange(24 * 4, dtype=np.float32).reshape(24, 4)
         sequences, next_boxes = build_nola_trajectory_examples(
@@ -88,8 +93,13 @@ class NolaVideoModelTest(unittest.TestCase):
 
     def test_mste_and_replay_strategies_use_regular_model_contract(self):
         from pyclad.strategies.baselines.mste import MSTE
-        from pyclad.strategies.replay.buffers.adaptive_balanced import AdaptiveBalancedReplayBuffer
-        from pyclad.strategies.replay.replay import ReplayEnhancedStrategy, ReplayOnlyStrategy
+        from pyclad.strategies.replay.buffers.adaptive_balanced import (
+            AdaptiveBalancedReplayBuffer,
+        )
+        from pyclad.strategies.replay.replay import (
+            ReplayEnhancedStrategy,
+            ReplayOnlyStrategy,
+        )
         from pyclad.strategies.replay.selection.random import RandomSelection
         from pyclad.video import NolaVideoModel
 
@@ -135,6 +145,29 @@ class NolaTrajectoryPredictorTest(unittest.TestCase):
 
         self.assertEqual(predictor.predict(trajectories).shape, (6, 4))
         self.assertEqual(predictor.errors(trajectories, next_boxes).shape, (6,))
+
+    def test_paper_kdnn_and_decision_rnn_follow_regular_model_contract(self):
+        from pyclad.video import NolaPaperModel
+
+        rng = np.random.default_rng(21)
+        nominal = rng.normal(scale=0.1, size=(32, 8)).astype(np.float32)
+        model = NolaPaperModel(
+            feature_dim=8,
+            neighbors=3,
+            kdnn_epochs=2,
+            decision_epochs=2,
+            batch_size=8,
+            hidden_dim=8,
+            decision_hidden_dim=8,
+        )
+        model.fit(nominal)
+
+        prediction = model.predict(nominal)
+        self.assertEqual(prediction.anomaly_scores.shape, (32,))
+        self.assertTrue(np.isfinite(prediction.anomaly_scores).all())
+        self.assertTrue(((prediction.anomaly_scores >= 0) & (prediction.anomaly_scores <= 1)).all())
+        self.assertEqual(model.additional_info()["kdnn_hidden_layers"], [8, 8, 8])
+        self.assertEqual(model.additional_info()["decision_rnn_input_steps"], 2)
 
 
 if __name__ == "__main__":

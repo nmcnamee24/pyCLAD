@@ -39,6 +39,8 @@ def validate_nola_cache(
     cache_directory: Path,
     *,
     expected_frame_stride: int = 1,
+    expected_detector: str | None = None,
+    expected_tracker: str | None = None,
 ) -> dict:
     directory = cache_directory.expanduser().resolve()
     if expected_frame_stride <= 0:
@@ -59,9 +61,13 @@ def validate_nola_cache(
     processed_frames = int(metadata["processed_frames"])
     frame_stride = int(metadata["frame_stride"])
     if frame_stride != expected_frame_stride:
-        raise ValueError(
-            f"NOLA cache frame_stride is {frame_stride}, expected {expected_frame_stride}"
-        )
+        raise ValueError(f"NOLA cache frame_stride is {frame_stride}, expected {expected_frame_stride}")
+    detector_name = str(metadata.get("detector", {}).get("name", ""))
+    tracker_name = str(metadata.get("tracker", {}).get("name", ""))
+    if expected_detector is not None and detector_name != expected_detector:
+        raise ValueError(f"NOLA cache detector is {detector_name!r}, expected {expected_detector!r}")
+    if expected_tracker is not None and tracker_name != expected_tracker:
+        raise ValueError(f"NOLA cache tracker is {tracker_name!r}, expected {expected_tracker!r}")
 
     decoded_source_frames = metadata.get("decoded_frame_count")
     validation_basis = "decoded_frame_count"
@@ -74,11 +80,7 @@ def validate_nola_cache(
             validation_basis = "container_frame_count"
         else:
             source_value = metadata.get("source_video")
-            source_video = (
-                None
-                if source_value is None
-                else Path(str(source_value)).expanduser().resolve()
-            )
+            source_video = None if source_value is None else Path(str(source_value)).expanduser().resolve()
             if source_video is None or not source_video.is_file():
                 raise ValueError(
                     f"NOLA cache contains {processed_frames} frames, expected "
@@ -101,27 +103,17 @@ def validate_nola_cache(
     with required["annotations"].open(encoding="utf-8") as stream:
         annotations = json.load(stream)
     if not isinstance(annotations, list) or len(annotations) != processed_frames:
-        raise ValueError(
-            f"NOLA annotation count is {len(annotations)}, expected {processed_frames}"
-        )
+        raise ValueError(f"NOLA annotation count is {len(annotations)}, expected {processed_frames}")
     annotation_frame_ids = [int(annotation["frame_id"]) for annotation in annotations]
-    expected_frame_ids = list(
-        range(1, decoded_source_frames + 1, expected_frame_stride)
-    )
+    expected_frame_ids = list(range(1, decoded_source_frames + 1, expected_frame_stride))
     if annotation_frame_ids != expected_frame_ids:
         raise ValueError(
             "NOLA annotation frame IDs do not cover every expected decodable "
             f"frame at stride {expected_frame_stride}"
         )
-    names_count = sum(
-        1
-        for line in required["names"].read_text(encoding="utf-8").splitlines()
-        if line
-    )
+    names_count = sum(1 for line in required["names"].read_text(encoding="utf-8").splitlines() if line)
     if names_count != processed_frames:
-        raise ValueError(
-            f"NOLA Names.txt contains {names_count} rows, expected {processed_frames}"
-        )
+        raise ValueError(f"NOLA Names.txt contains {names_count} rows, expected {processed_frames}")
     tracks = np.load(required["tracks"], allow_pickle=True)
     if tracks.ndim != 2 or tracks.shape[1] != 4:
         raise ValueError(f"NOLA tracks must have shape (rows, 4), got {tracks.shape}")
@@ -133,6 +125,8 @@ def validate_nola_cache(
         "decoded_frame_count": decoded_source_frames,
         "processed_frames": processed_frames,
         "frame_stride": frame_stride,
+        "detector": detector_name,
+        "tracker": tracker_name,
         "track_rows": len(tracks),
         "validation_basis": validation_basis,
     }
@@ -142,10 +136,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("cache_directory", type=Path)
     parser.add_argument("--expected-frame-stride", type=int, default=1)
+    parser.add_argument("--expected-detector")
+    parser.add_argument("--expected-tracker")
     arguments = parser.parse_args(argv)
     result = validate_nola_cache(
         arguments.cache_directory,
         expected_frame_stride=arguments.expected_frame_stride,
+        expected_detector=arguments.expected_detector,
+        expected_tracker=arguments.expected_tracker,
     )
     print(json.dumps(result, indent=2, allow_nan=False))
 

@@ -35,7 +35,8 @@ class NolaVideoModel(VideoAnomalyModel):
         temporal_weight: float = 1.0,
         trajectory_weight: float = 1.0,
         apply_odit: bool = True,
-        drift: float = 7.0,
+        drift: Optional[float] = None,
+        drift_quantile: float = 0.95,
         threshold: float = 0.5,
     ):
         if neighbors <= 0:
@@ -44,8 +45,10 @@ class NolaVideoModel(VideoAnomalyModel):
             raise ValueError("distance_aggregation must be 'sum', 'mean', or 'max'")
         if min(spatial_weight, temporal_weight, trajectory_weight) < 0:
             raise ValueError("NOLA feature-family weights must be non-negative")
-        if drift < 0:
+        if drift is not None and drift < 0:
             raise ValueError("drift must be non-negative")
+        if not 0.0 < drift_quantile < 1.0:
+            raise ValueError("drift_quantile must be strictly between zero and one")
 
         self.layout = layout
         self.strategy_schema = strategy_schema or VideoStrategySchema(feature_dim=layout.feature_dim)
@@ -57,7 +60,8 @@ class NolaVideoModel(VideoAnomalyModel):
         self.temporal_weight = float(temporal_weight)
         self.trajectory_weight = float(trajectory_weight)
         self.apply_odit = bool(apply_odit)
-        self.drift = float(drift)
+        self.drift = None if drift is None else float(drift)
+        self.drift_quantile = float(drift_quantile)
         self.threshold = float(threshold)
 
         self._spatial_scaler: Optional[MinMaxScaler] = None
@@ -66,6 +70,7 @@ class NolaVideoModel(VideoAnomalyModel):
         self._temporal_memory: Optional[NearestNeighbors] = None
         self._effective_neighbors = 0
         self._trajectory_baseline = 0.0
+        self._effective_drift = 0.0
         self._fit_rows = 0
         self._fit_calls = 0
 
@@ -91,13 +96,18 @@ class NolaVideoModel(VideoAnomalyModel):
             self._ensure_finite(trajectory_error, "trajectory_error")
             self._trajectory_baseline = float(np.median(np.maximum(trajectory_error, 0.0)))
 
+        if self.drift is None:
+            nominal_scores = self._score_features(features)
+            self._effective_drift = float(np.quantile(nominal_scores, self.drift_quantile))
+        else:
+            self._effective_drift = self.drift
         self._fit_rows = len(features)
         self._fit_calls += 1
         return self
 
     def predict(self, data: np.ndarray) -> VideoPredictionResults:
         raw_scores = self.score_samples(data)
-        anomaly_scores = odit_cusum(raw_scores, drift=self.drift) if self.apply_odit else raw_scores
+        anomaly_scores = odit_cusum(raw_scores, drift=self._effective_drift) if self.apply_odit else raw_scores
         return VideoPredictionResults(
             y_pred=(anomaly_scores >= self.threshold).astype(np.int64),
             anomaly_scores=anomaly_scores,
@@ -114,6 +124,9 @@ class NolaVideoModel(VideoAnomalyModel):
             raise RuntimeError("NOLA must be fitted before scoring")
 
         features = self._features(data, allow_features_only=True)
+        return self._score_features(features)
+
+    def _score_features(self, features: np.ndarray) -> np.ndarray:
         spatial, temporal, trajectory_error = self.layout.split(features)
         self._ensure_finite(spatial, "spatial")
         self._ensure_finite(temporal, "temporal")
@@ -151,6 +164,8 @@ class NolaVideoModel(VideoAnomalyModel):
             "trajectory_weight": self.trajectory_weight,
             "apply_odit": self.apply_odit,
             "drift": self.drift,
+            "drift_quantile": self.drift_quantile,
+            "effective_drift": self._effective_drift,
             "threshold": self.threshold,
             "fit_rows": self._fit_rows,
             "fit_calls": self._fit_calls,

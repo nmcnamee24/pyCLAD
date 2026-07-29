@@ -7,6 +7,20 @@ from typing import Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
+NOLA_OBJECT_ALIASES = {
+    "bicycle": "bike",
+    "motorbike": "bike",
+    "motorcycle": "bike",
+    "potted plant": "pottedplant",
+}
+
+
+def canonical_nola_object_name(name: object) -> str:
+    """Normalize Darknet, COCO, and torchvision class spellings."""
+
+    normalized = str(name).strip().lower()
+    return NOLA_OBJECT_ALIASES.get(normalized, normalized)
+
 
 @dataclass(frozen=True)
 class NolaFeatureLayout:
@@ -100,7 +114,7 @@ def nola_temporal_object_features(
     vehicle_count = 0
     person_count = 0
     for detected in objects:
-        name = str(detected.get("name", ""))
+        name = canonical_nola_object_name(detected.get("name", ""))
         confidence = float(detected.get("confidence", 0.0))
         if confidence <= confidence_threshold:
             continue
@@ -124,9 +138,12 @@ def nola_spatial_object_features(
         raise ValueError(f"boxes must have shape (rows, 4), got {box_array.shape}")
     if len(class_names) != len(box_array):
         raise ValueError("class_names must have one entry per box")
-    class_to_index = {name: index for index, name in enumerate(relevant_classes)}
+    class_to_index = {canonical_nola_object_name(name): index for index, name in enumerate(relevant_classes)}
     try:
-        class_indices = np.asarray([class_to_index[name] for name in class_names], dtype=np.float32)
+        class_indices = np.asarray(
+            [class_to_index[canonical_nola_object_name(name)] for name in class_names],
+            dtype=np.float32,
+        )
     except KeyError as error:
         raise ValueError(f"unknown NOLA object class: {error.args[0]!r}") from error
     return np.concatenate([box_array, class_indices[:, None]], axis=1)

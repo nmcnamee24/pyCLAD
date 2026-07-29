@@ -14,7 +14,7 @@ HPC_ROOT="${PYVAD_HPC_ROOT:-${HOME}/pyvad_hpc}"
 RUN_ID="${PYCLAD_RUN_ID:?Set PYCLAD_RUN_ID before submitting the array}"
 MANIFEST="${HPC_ROOT}/jobs/nola_test_ids.txt"
 RESULT_DIR="${HPC_ROOT}/results/${RUN_ID}"
-PROCESSED_ROOT="${HPC_ROOT}/data/nola/processed"
+PROCESSED_ROOT="${HPC_ROOT}/data/nola/processed-paper"
 STAGING_ROOT="${HPC_ROOT}/staging/nola"
 COMMIT_FILE="${HPC_ROOT}/code/PYCLAD_COMMIT_SHA"
 
@@ -42,10 +42,15 @@ export MKL_NUM_THREADS="${LSB_DJOB_NUMPROC:-2}"
 export OPENBLAS_NUM_THREADS="${LSB_DJOB_NUMPROC:-2}"
 export NUMEXPR_NUM_THREADS="${LSB_DJOB_NUMPROC:-2}"
 
+source /etc/profile
+module load gcc12/12.2.0
+module load cuda12.3/toolkit/12.3.2
 source "${HPC_ROOT}/env/bin/activate"
 if python -m pyclad.video.hpc.validate_nola_cache \
   "${final_dir}" \
   --expected-frame-stride 1 \
+  --expected-detector native-darknet-yolov4-csp \
+  --expected-tracker deep-sort-realtime \
   > "${RESULT_DIR}/nola-preprocess/${video_id}.validation.json" 2>/dev/null; then
   echo "Validated cache already exists for ${video_id}; skipping."
   exit 0
@@ -61,6 +66,22 @@ python -m pyclad.video nola-preprocess \
   --output-root "${array_stage_root}" \
   --video-ids "${video_id}" \
   --frame-stride 1 \
+  --confidence-threshold 0.25 \
+  --detector darknet \
+  --darknet-binary "${HPC_ROOT}/tools/darknet/darknet" \
+  --darknet-source-commit 59596d7880f6504768df41d6daa586f5cb2b932f \
+  --darknet-data "${HPC_ROOT}/data/nola/darknet/coco.data" \
+  --darknet-config "${HPC_ROOT}/data/nola/darknet/yolov4-csp.cfg" \
+  --darknet-weights "${HPC_ROOT}/data/nola/darknet/yolov4-csp.weights" \
+  --darknet-weights-sha256 019496affba568f7439e54797a1772657bb01126b707fbd93407c0b20c20dca1 \
+  --darknet-names "${HPC_ROOT}/data/nola/darknet/coco.names" \
+  --nms-threshold 0.45 \
+  --tracker deepsort \
+  --tracker-max-age 30 \
+  --tracker-n-init 3 \
+  --tracker-max-cosine-distance 0.2 \
+  --tracker-nn-budget 100 \
+  --tracker-embedder mobilenet \
   --device cuda \
   --seed "${PYCLAD_SEED:-42}" \
   --output-json "${RESULT_DIR}/nola-preprocess/${video_id}.json"
@@ -68,6 +89,8 @@ python -m pyclad.video nola-preprocess \
 python -m pyclad.video.hpc.validate_nola_cache \
   "${stage_dir}" \
   --expected-frame-stride 1 \
+  --expected-detector native-darknet-yolov4-csp \
+  --expected-tracker deep-sort-realtime \
   > "${RESULT_DIR}/nola-preprocess/${video_id}.validation.json"
 
 if test -e "${final_dir}"; then

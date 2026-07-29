@@ -1,10 +1,71 @@
-"""Sequential NOLA scoring and track-cleaning utilities."""
+"""Sequential NOLA scoring, diagnostics, and track-cleaning utilities."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional, Sequence
 
 import numpy as np
+
+
+class DegenerateNolaScoresError(RuntimeError):
+    """Raised when a completed NOLA evaluation has no ranking information."""
+
+
+@dataclass(frozen=True)
+class NolaScoreDiagnostics:
+    rows: int
+    minimum: float
+    maximum: float
+    mean: float
+    standard_deviation: float
+    nonzero_fraction: float
+    unique_values: int
+
+    @property
+    def is_degenerate(self) -> bool:
+        return self.rows == 0 or self.unique_values < 2 or self.standard_deviation == 0.0
+
+    def as_dict(self) -> dict[str, float | int | bool]:
+        return {
+            "rows": self.rows,
+            "minimum": self.minimum,
+            "maximum": self.maximum,
+            "mean": self.mean,
+            "standard_deviation": self.standard_deviation,
+            "nonzero_fraction": self.nonzero_fraction,
+            "unique_values": self.unique_values,
+            "degenerate": self.is_degenerate,
+        }
+
+
+def nola_score_diagnostics(scores: Sequence[float]) -> NolaScoreDiagnostics:
+    values = np.asarray(scores, dtype=np.float64).reshape(-1)
+    if not len(values):
+        return NolaScoreDiagnostics(0, float("nan"), float("nan"), float("nan"), float("nan"), 0.0, 0)
+    if not np.isfinite(values).all():
+        raise ValueError("NOLA scores must contain only finite values")
+    return NolaScoreDiagnostics(
+        rows=len(values),
+        minimum=float(values.min()),
+        maximum=float(values.max()),
+        mean=float(values.mean()),
+        standard_deviation=float(values.std()),
+        nonzero_fraction=float(np.count_nonzero(values) / len(values)),
+        unique_values=int(len(np.unique(values))),
+    )
+
+
+def require_non_degenerate_nola_scores(scores: Sequence[float]) -> NolaScoreDiagnostics:
+    diagnostics = nola_score_diagnostics(scores)
+    if diagnostics.is_degenerate:
+        raise DegenerateNolaScoresError(
+            "NOLA produced degenerate anomaly scores "
+            f"(rows={diagnostics.rows}, unique={diagnostics.unique_values}, "
+            f"std={diagnostics.standard_deviation}, min={diagnostics.minimum}, "
+            f"max={diagnostics.maximum}). Refusing to report a chance-level run."
+        )
+    return diagnostics
 
 
 def odit_cusum(statistics: Sequence[float], drift: float = 7.0, initial: float = 0.0) -> np.ndarray:
