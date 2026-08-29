@@ -17,6 +17,9 @@ nav:
     - Models: 'models.md'
     - Scenarios: 'scenarios.md'
     - Strategies: 'strategies.md'
+  - Video anomaly detection:
+    - UCF-Crime and COMMAND: 'video_ucf_command.md'
+    - COMMAND recreation contract: 'command_recreation.md'
   - How to contribute?: 'contribution.md'
 plugins:
   - search

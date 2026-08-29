@@ -31,6 +31,21 @@ We do not include them in default installation to avoid putting heavy dependenci
 pyCLAD supports the use of any model from pyOD library, some of which may require installation of additional packages (
 see [pyOD docs](https://pyod.readthedocs.io/en/latest/).
 
+#### Video anomaly detection
+
+The `pyclad.video` namespace provides a focused UCF-Crime workflow with a
+clean-room recreation of COMMAND and complete-bag ContTrain++ training:
+
+```shell
+pip install -e '.[video]'
+pyclad-video ucf-audit --data-root /path/to/UCF-Crime --check-feature-arrays
+pyclad-video ucf-command --data-root /path/to/UCF-Crime --tasks T1,T2,T3 --device cuda
+```
+
+The 4/4/5 continual stream is explicitly attributed to COMMAND Section IV-C;
+it is not presented as an official UCF-Crime split or as the authors' code.
+See the [UCF-Crime and COMMAND guide](docs/video_ucf_command.md).
+
 ### Getting started
 
 There are a few valuable resources supporting getting started with pyCLAD:
