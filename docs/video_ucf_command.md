@@ -30,6 +30,18 @@ This stream is named `command-paper-recreation-4-4-5`. It is not presented
 as a universal UCF-Crime continual split, author code, or an exact numerical
 reproduction.
 
+## Relationship to pyCLAD core
+
+`pyclad.video` is a sibling of `pyclad.vision`, not a second framework. Its
+`VideoConcept` extends the regular `Concept` with aligned temporal windows,
+and `CommandVideoModel` directly implements the existing `TorchBackbone`
+interface. Ordinary strategies reuse `TorchModelAdapter`; no video-specific
+strategy or model adapter is required.
+
+The paper recreation remains a small deliberate exception because generic
+pyCLAD strategies batch matrix rows, while COMMAND and ContTrain++ train and
+replay variable-length, complete-video bags.
+
 ## Install and audit
 
 ```shell
@@ -86,7 +98,7 @@ compatibility alias.
 ## Programmatic scenario access
 
 ```python
-from pyclad.video.ucf_crime import build_command_ucf_crime_scenario
+from pyclad.video.ucf_crime.scenarios import build_command_ucf_crime_scenario
 
 primary = build_command_ucf_crime_scenario()
 classwise = build_command_ucf_crime_scenario("classwise")

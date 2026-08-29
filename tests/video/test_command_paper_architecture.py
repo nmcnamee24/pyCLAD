@@ -11,7 +11,9 @@ TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
 @unittest.skipUnless(TORCH_AVAILABLE, "COMMAND requires the optional torch dependency")
 class PaperCommandArchitectureTest(unittest.TestCase):
     def _small_config(self):
-        from pyclad.video.models.command import PaperCommandArchitectureConfig
+        from pyclad.video.models.command.paper_architecture import (
+            PaperCommandArchitectureConfig,
+        )
 
         return PaperCommandArchitectureConfig(
             appearance_dim=4,
@@ -28,7 +30,9 @@ class PaperCommandArchitectureTest(unittest.TestCase):
         )
 
     def test_published_defaults_are_fixed_in_config(self):
-        from pyclad.video.models.command import PaperCommandArchitectureConfig
+        from pyclad.video.models.command.paper_architecture import (
+            PaperCommandArchitectureConfig,
+        )
 
         config = PaperCommandArchitectureConfig()
 
@@ -39,7 +43,7 @@ class PaperCommandArchitectureTest(unittest.TestCase):
         self.assertEqual(config.memory_size, 256)
 
     def test_default_parameter_count_is_locked(self):
-        from pyclad.video.models.command import PaperCommandNetwork
+        from pyclad.video.models.command.paper_architecture import PaperCommandNetwork
 
         model = PaperCommandNetwork()
         self.assertEqual(sum(parameter.numel() for parameter in model.parameters()), 15_036_943)
@@ -47,7 +51,7 @@ class PaperCommandArchitectureTest(unittest.TestCase):
     def test_complete_sequence_reaches_every_paper_module(self):
         import torch
 
-        from pyclad.video.models.command import PaperCommandNetwork
+        from pyclad.video.models.command.paper_architecture import PaperCommandNetwork
 
         config = self._small_config()
         model = PaperCommandNetwork(config).eval()
@@ -69,7 +73,7 @@ class PaperCommandArchitectureTest(unittest.TestCase):
     def test_augfusenet_is_exact_modality_concatenation(self):
         import torch
 
-        from pyclad.video.models.command import PaperAugFuseNet
+        from pyclad.video.models.command.paper_architecture import PaperAugFuseNet
 
         appearance = torch.tensor([[[1.0, 2.0]]])
         motion = torch.tensor([[[3.0, 4.0, 5.0]]])
@@ -79,7 +83,7 @@ class PaperCommandArchitectureTest(unittest.TestCase):
         torch.testing.assert_close(fused, torch.tensor([[[1.0, 2.0, 3.0, 4.0, 5.0]]]))
 
     def test_temporal_convolution_has_published_kernel_and_is_depthwise(self):
-        from pyclad.video.models.command import PaperCommandNetwork
+        from pyclad.video.models.command.paper_architecture import PaperCommandNetwork
 
         config = self._small_config()
         model = PaperCommandNetwork(config)
@@ -92,7 +96,7 @@ class PaperCommandArchitectureTest(unittest.TestCase):
     def test_memdualnet_uses_exact_euclidean_minimum(self):
         import torch
 
-        from pyclad.video.models.command import PaperMemDualNet
+        from pyclad.video.models.command.paper_architecture import PaperMemDualNet
 
         memory = PaperMemDualNet(feature_dim=2, memory_size=2)
         with torch.no_grad():
@@ -108,7 +112,7 @@ class PaperCommandArchitectureTest(unittest.TestCase):
     def test_frequency_aware_fifo_lru_replacement_is_deterministic(self):
         import torch
 
-        from pyclad.video.models.command import PaperMemDualNet
+        from pyclad.video.models.command.paper_architecture import PaperMemDualNet
 
         memory = PaperMemDualNet(feature_dim=2, memory_size=3)
         memory.primary_access_count.copy_(torch.tensor([2, 0, 0]))

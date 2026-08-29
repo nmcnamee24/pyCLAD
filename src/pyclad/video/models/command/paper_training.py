@@ -18,7 +18,8 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from pyclad.video.data import VideoFeatureConcept, VideoWindow
+from pyclad.video.data.sample import VideoWindow
+from pyclad.video.data.video_concept import VideoConcept
 from pyclad.video.models.command.paper_architecture import (
     PaperAugFuseNet,
     PaperCommandArchitectureConfig,
@@ -402,7 +403,7 @@ def _supervised_info_nce(projections: Tensor, labels: Tensor, temperature: float
 
 
 def bags_from_concept(
-    concept: VideoFeatureConcept,
+    concept: VideoConcept,
     *,
     task_id: str | None = None,
     expected_windows: int = 32,

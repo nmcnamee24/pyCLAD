@@ -12,7 +12,7 @@ import numpy as np
 class VideoStrategySchema:
     """Describe feature and target columns in a strategy-facing matrix.
 
-    Core pyCLAD sees only an ordinary matrix. Video model adapters use this
+    Core pyCLAD sees only an ordinary matrix. Video backbones use this
     schema to prevent reserved weak-supervision columns from becoming features.
     """
 

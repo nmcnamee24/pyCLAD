@@ -30,18 +30,31 @@ or author code.
 
 ## Package boundary
 
-The generic video layer provides:
+The video layer follows the same pattern as `pyclad.vision`:
 
-- temporal-window and complete-video-bag metadata;
-- feature stores and window-to-frame score aggregation;
-- weak-label and bag-identity schema columns;
-- frame ROC-AUC and average precision;
-- adapters for ordinary callable and PyTorch models.
+- `VideoConcept` extends the core `Concept` with aligned temporal windows;
+- `CommandVideoModel` directly implements the core `TorchBackbone` contract;
+- core strategies and `TorchModelAdapter` are reused without video-specific
+  copies;
+- video-only code is limited to UCF-Crime records, complete-video bags,
+  frame-score aggregation, and frame metrics.
 
 `CommandVideoModel` implements a compact, strategy-compatible COMMAND model
-for comparisons with pyCLAD strategies. The primary `ucf-command` workflow
-uses `PaperCommandVideoModel` and `ContTrainPlusPlusTrainer`, which retain
-complete `(video, time, feature)` bags through training and replay.
+for comparisons with pyCLAD's regular PyTorch strategies. Wrap it in the
+existing `TorchModelAdapter` for strategies that consume the ordinary
+`Model.fit()` interface. The primary `ucf-command` workflow uses
+`PaperCommandVideoModel` and `ContTrainPlusPlusTrainer`, which retain complete
+`(video, time, feature)` bags through training and replay.
+
+```python
+from pyclad.models.adapters.torch_adapter import TorchModelAdapter
+from pyclad.strategies.baselines.naive import NaiveStrategy
+from pyclad.video.models.command.model import CommandVideoModel
+
+backbone = CommandVideoModel(feature_dim=2048)
+model = TorchModelAdapter(backbone, epochs=10, batch_size=32)
+strategy = NaiveStrategy(model)
+```
 
 See the [UCF-Crime and COMMAND guide](../../../docs/video_ucf_command.md) and
 the [recreation contract](../../../docs/command_recreation.md).

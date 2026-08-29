@@ -13,7 +13,9 @@ import torch
 class PaperCommandTrainingTest(unittest.TestCase):
     @staticmethod
     def _architecture():
-        from pyclad.video.models.command import PaperCommandArchitectureConfig
+        from pyclad.video.models.command.paper_architecture import (
+            PaperCommandArchitectureConfig,
+        )
 
         return PaperCommandArchitectureConfig(
             appearance_dim=4,
@@ -30,8 +32,8 @@ class PaperCommandTrainingTest(unittest.TestCase):
         )
 
     def test_composite_loss_is_finite_and_zeros_positive_dependent_terms_without_positives(self):
-        from pyclad.video.models.command import (
-            PaperCommandNetwork,
+        from pyclad.video.models.command.paper_architecture import PaperCommandNetwork
+        from pyclad.video.models.command.paper_training import (
             paper_command_composite_loss,
         )
 
@@ -48,7 +50,7 @@ class PaperCommandTrainingTest(unittest.TestCase):
         self.assertEqual(float(normal_only.anomaly_separation.detach()), 0.0)
 
     def test_replay_selection_balances_labels_tasks_and_keeps_complete_bags(self):
-        from pyclad.video.models.command import (
+        from pyclad.video.models.command.paper_training import (
             ContTrainReplayBuffer,
             PaperVideoBag,
             ReplayEntry,
@@ -77,7 +79,7 @@ class PaperCommandTrainingTest(unittest.TestCase):
         self.assertGreaterEqual(len({bag.task_id for bag in sample}), 2)
 
     def test_optimizer_uses_slow_secondary_memory_group_and_checkpoint_resumes(self):
-        from pyclad.video.models.command import (
+        from pyclad.video.models.command.paper_training import (
             ContTrainPlusPlusTrainer,
             PaperCommandTrainerConfig,
             PaperCommandVideoModel,
@@ -123,7 +125,7 @@ class PaperCommandTrainingTest(unittest.TestCase):
         self.assertEqual(len(restored.replay), 4)
 
     def test_calibration_is_bounded_monotonic_and_retains_extreme_tail_rank(self):
-        from pyclad.video.models.command import (
+        from pyclad.video.models.command.paper_training import (
             ContTrainPlusPlusTrainer,
             PaperCommandTrainerConfig,
             PaperCommandVideoModel,
@@ -158,7 +160,7 @@ class PaperCommandTrainingTest(unittest.TestCase):
         self.assertGreater(len(np.unique(scores)), 1)
 
     def test_learning_rate_schedule_restarts_at_each_task_boundary(self):
-        from pyclad.video.models.command import (
+        from pyclad.video.models.command.paper_training import (
             ContTrainPlusPlusTrainer,
             PaperCommandTrainerConfig,
             PaperCommandVideoModel,
@@ -199,10 +201,11 @@ class PaperCommandTrainingTest(unittest.TestCase):
         self.assertAlmostEqual(second["learning_rates"]["secondary_memory"], 1e-6)
 
     def test_bag_adapter_rejects_incompatible_1024_dimensional_cache(self):
-        from pyclad.video.data import VideoFeatureConcept, VideoWindow
-        from pyclad.video.models.command import bags_from_concept
+        from pyclad.video.data.sample import VideoWindow
+        from pyclad.video.data.video_concept import VideoConcept
+        from pyclad.video.models.command.paper_training import bags_from_concept
 
-        concept = VideoFeatureConcept(
+        concept = VideoConcept.from_features(
             name="old-cache",
             features=np.zeros((32, 1024), dtype=np.float32),
             windows=tuple(
@@ -214,8 +217,9 @@ class PaperCommandTrainingTest(unittest.TestCase):
             bags_from_concept(concept)
 
     def test_duplicate_archive_paths_remain_distinct_record_bags(self):
-        from pyclad.video.data import VideoFeatureConcept, VideoWindow
-        from pyclad.video.models.command import bags_from_concept
+        from pyclad.video.data.sample import VideoWindow
+        from pyclad.video.data.video_concept import VideoConcept
+        from pyclad.video.models.command.paper_training import bags_from_concept
 
         windows = []
         for record in ("normal:0001", "normal:0002"):
@@ -230,7 +234,7 @@ class PaperCommandTrainingTest(unittest.TestCase):
                         payload={"window_index": index, "record_instance_id": record},
                     )
                 )
-        concept = VideoFeatureConcept(
+        concept = VideoConcept.from_features(
             name="T3",
             features=np.zeros((64, 2048), dtype=np.float32),
             windows=tuple(windows),

@@ -15,9 +15,9 @@ from typing import Dict, Iterable, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from pyclad.video.data import VideoFeatureConcept, VideoStrategySchema, VideoWindow
-from pyclad.video.data.base import VideoDataset
-from pyclad.video.features.store import InMemoryVideoFeatureStore, VideoFeatureStore
+from pyclad.video.data.matrix import VideoStrategySchema
+from pyclad.video.data.sample import VideoWindow
+from pyclad.video.data.video_concept import VideoConcept
 
 COMMAND_UCF_CRIME_CONCEPT_ORDER = (
     "Abuse",
@@ -60,7 +60,7 @@ class CommandUcfCrimeRecord:
         return self.relative_path
 
 
-class CommandUcfCrimeDataset(VideoDataset):
+class CommandUcfCrimeDataset:
     """Load the exact UCF-Crime feature layout published with COMMAND.
 
     Training concepts are balanced continual experiences: each anomaly class
@@ -116,10 +116,6 @@ class CommandUcfCrimeDataset(VideoDataset):
         self._bag_ids = {
             id(record): float(index) for index, record in enumerate((*self._normal_train, *self._anomaly_train))
         }
-        self._test_cache: Optional[tuple[InMemoryVideoFeatureStore, Tuple[VideoWindow, ...], Dict[str, np.ndarray]]] = (
-            None
-        )
-
         unknown = sorted({record.anomaly_class for record in self._anomaly_train} - set(self.concept_order))
         if unknown:
             raise ValueError(f"concept_order is missing anomaly classes: {unknown}")
@@ -149,14 +145,6 @@ class CommandUcfCrimeDataset(VideoDataset):
     def name(self) -> str:
         return self._dataset_name
 
-    def feature_store(self) -> VideoFeatureStore:
-        return self._test_data()[0]
-
-    def windows(self, split: str = "test") -> Sequence[VideoWindow]:
-        if split != "test":
-            raise KeyError("COMMAND exposes continual training data through training_concepts(); split must be 'test'")
-        return self._test_data()[1]
-
     def frame_labels(self, split: str = "test") -> Dict[str, np.ndarray]:
         if split != "test":
             raise KeyError("frame labels are available only for split='test'")
@@ -167,7 +155,7 @@ class CommandUcfCrimeDataset(VideoDataset):
         *,
         concepts: Optional[Sequence[str]] = None,
         max_videos_per_class: Optional[int] = None,
-    ) -> Tuple[VideoFeatureConcept, ...]:
+    ) -> Tuple[VideoConcept, ...]:
         """Return balanced anomaly-class experiences in continual order."""
 
         if max_videos_per_class is not None and max_videos_per_class <= 0:
@@ -207,7 +195,7 @@ class CommandUcfCrimeDataset(VideoDataset):
         self,
         *,
         max_videos_per_class: Optional[int] = None,
-    ) -> Tuple[VideoFeatureConcept, ...]:
+    ) -> Tuple[VideoConcept, ...]:
         """Return PyCLAD's recreation of COMMAND's three-task protocol.
 
         Complete videos and globally unique bag identifiers are preserved. The
@@ -222,7 +210,7 @@ class CommandUcfCrimeDataset(VideoDataset):
                 max_videos_per_class=max_videos_per_class,
             )
             tasks.append(
-                VideoFeatureConcept(
+                VideoConcept.from_features(
                     name=f"T{task_index}",
                     features=np.concatenate([concept.features for concept in concepts]).astype(np.float32, copy=False),
                     windows=tuple(window for concept in concepts for window in concept.windows),
@@ -243,7 +231,7 @@ class CommandUcfCrimeDataset(VideoDataset):
         video_ids: Optional[Iterable[str]] = None,
         max_normal_videos: Optional[int] = None,
         max_anomaly_videos: Optional[int] = None,
-    ) -> VideoFeatureConcept:
+    ) -> VideoConcept:
         """Build a feature-only test concept, optionally restricted for smoke runs."""
 
         selected_ids = None if video_ids is None else set(video_ids)
@@ -266,7 +254,7 @@ class CommandUcfCrimeDataset(VideoDataset):
             raise ValueError("no COMMAND test videos were selected")
 
         features, windows, _ = self._load_records(records, split="test")
-        return VideoFeatureConcept(
+        return VideoConcept.from_features(
             name=name,
             features=features,
             windows=windows,
@@ -278,11 +266,11 @@ class CommandUcfCrimeDataset(VideoDataset):
         self,
         concept: str,
         records: Sequence[CommandUcfCrimeRecord],
-    ) -> VideoFeatureConcept:
-        features, windows, row_records = self._load_records(records, split="train", concept_id=concept)
+    ) -> VideoConcept:
+        features, windows, row_records = self._load_records(records, split="train")
         weak_labels = np.asarray([record.weak_label for record in row_records], dtype=np.float32)
         bag_ids = np.asarray([self._bag_ids[id(record)] for record in row_records], dtype=np.float32)
-        return VideoFeatureConcept(
+        return VideoConcept.from_features(
             name=concept,
             features=features,
             windows=windows,
@@ -294,25 +282,11 @@ class CommandUcfCrimeDataset(VideoDataset):
             },
         )
 
-    def _test_data(
-        self,
-    ) -> tuple[InMemoryVideoFeatureStore, Tuple[VideoWindow, ...], Dict[str, np.ndarray]]:
-        if self._test_cache is None:
-            features, windows, _ = self._load_records(self._test_records, split="test")
-            frame_labels = {record.video_id: self._frame_labels_for_record(record) for record in self._test_records}
-            self._test_cache = (
-                InMemoryVideoFeatureStore(features),
-                windows,
-                frame_labels,
-            )
-        return self._test_cache
-
     def _load_records(
         self,
         records: Sequence[CommandUcfCrimeRecord],
         *,
         split: str,
-        concept_id: Optional[str] = None,
     ) -> tuple[np.ndarray, Tuple[VideoWindow, ...], Tuple[CommandUcfCrimeRecord, ...]]:
         feature_blocks = []
         windows = []
@@ -335,7 +309,6 @@ class CommandUcfCrimeDataset(VideoDataset):
                         end_frame=end_frame,
                         label=label,
                         anomaly_class=record.anomaly_class,
-                        concept_id=concept_id,
                         payload={
                             "relative_path": record.relative_path,
                             "window_index": window_index,

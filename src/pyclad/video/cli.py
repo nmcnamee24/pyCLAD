@@ -98,7 +98,7 @@ def _add_command_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def _run_ucf_audit(arguments: argparse.Namespace) -> None:
-    from pyclad.video.ucf_crime import audit_command_ucf_crime
+    from pyclad.video.ucf_crime.audit import audit_command_ucf_crime
 
     report = audit_command_ucf_crime(
         arguments.data_root,
@@ -116,8 +116,10 @@ def _run_ucf_audit(arguments: argparse.Namespace) -> None:
 
 
 def _paper_trainer_config(arguments: argparse.Namespace):
-    from pyclad.video.models.command import (
+    from pyclad.video.models.command.paper_architecture import (
         PaperCommandArchitectureConfig,
+    )
+    from pyclad.video.models.command.paper_training import (
         PaperCommandLossConfig,
         PaperCommandTrainerConfig,
     )
@@ -149,16 +151,14 @@ def _paper_trainer_config(arguments: argparse.Namespace):
 
 
 def _run_command_paper(arguments: argparse.Namespace) -> None:
-    from pyclad.video import (
-        CommandUcfCrimeDataset,
-        audit_command_ucf_crime,
-        build_command_ucf_crime_scenario,
-    )
-    from pyclad.video.models.command import (
+    from pyclad.video.datasets.command_ucf_crime import CommandUcfCrimeDataset
+    from pyclad.video.models.command.paper_training import (
         ContTrainPlusPlusTrainer,
         PaperCommandVideoModel,
         bags_from_concept,
     )
+    from pyclad.video.ucf_crime.audit import audit_command_ucf_crime
+    from pyclad.video.ucf_crime.scenarios import build_command_ucf_crime_scenario
 
     archive_audit = audit_command_ucf_crime(arguments.data_root, check_feature_arrays=True)
     if not archive_audit.ready:
@@ -225,8 +225,11 @@ def _run_command_paper(arguments: argparse.Namespace) -> None:
 
 
 def _evaluate_paper_predictions(dataset, test, trainer) -> dict[str, object]:
-    from pyclad.video import compute_video_frame_metrics, window_scores_to_frame_scores
-    from pyclad.video.models.command import bags_from_concept
+    from pyclad.video.metrics.frame import (
+        compute_video_frame_metrics,
+        window_scores_to_frame_scores,
+    )
+    from pyclad.video.models.command.paper_training import bags_from_concept
 
     bags = bags_from_concept(test, task_id="test")
     predictions = trainer.predict_bags(bags)

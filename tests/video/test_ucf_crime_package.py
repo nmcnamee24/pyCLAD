@@ -47,7 +47,7 @@ class UcfCrimePackageTest(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_primary_scenario_is_labeled_as_command_paper_recreation(self):
-        from pyclad.video.ucf_crime import build_command_ucf_crime_scenario
+        from pyclad.video.ucf_crime.scenarios import build_command_ucf_crime_scenario
 
         scenario = build_command_ucf_crime_scenario()
 
@@ -63,10 +63,10 @@ class UcfCrimePackageTest(unittest.TestCase):
         self.assertEqual(historical_alias.as_dict(), scenario.as_dict())
 
     def test_classwise_and_held_out_scenarios_cover_all_classes_once(self):
-        from pyclad.video.ucf_crime import (
+        from pyclad.video.datasets.command_ucf_crime import (
             COMMAND_UCF_CRIME_CONCEPT_ORDER,
-            build_command_ucf_crime_scenario,
         )
+        from pyclad.video.ucf_crime.scenarios import build_command_ucf_crime_scenario
 
         classwise = build_command_ucf_crime_scenario("classwise")
         held_out = build_command_ucf_crime_scenario("12-1", held_out_class="Shooting")
@@ -80,7 +80,7 @@ class UcfCrimePackageTest(unittest.TestCase):
             self.assertEqual(len(flattened), 13)
 
     def test_audit_reports_duplicate_records_without_marking_archive_invalid(self):
-        from pyclad.video.ucf_crime import audit_command_ucf_crime
+        from pyclad.video.ucf_crime.audit import audit_command_ucf_crime
 
         audit = audit_command_ucf_crime(self.root, check_feature_arrays=True)
 
@@ -102,7 +102,7 @@ class UcfCrimePackageTest(unittest.TestCase):
         self.assertIn("COMMAND release manifest", payload["provenance"]["manifest_relationship"])
 
     def test_duplicate_split_rows_keep_distinct_bag_ids(self):
-        from pyclad.video import CommandUcfCrimeDataset
+        from pyclad.video.datasets.command_ucf_crime import CommandUcfCrimeDataset
 
         dataset = CommandUcfCrimeDataset(
             self.root,
@@ -117,7 +117,7 @@ class UcfCrimePackageTest(unittest.TestCase):
         self.assertEqual(len(set(normal_bag_ids)), 2)
 
     def test_audit_distinguishes_official_videos_from_command_manifest_rows(self):
-        from pyclad.video.ucf_crime import CommandUcfCrimeAudit
+        from pyclad.video.ucf_crime.audit import CommandUcfCrimeAudit
 
         audit = CommandUcfCrimeAudit(
             root=str(self.root),

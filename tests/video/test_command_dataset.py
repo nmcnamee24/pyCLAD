@@ -48,7 +48,7 @@ class CommandUcfCrimeDatasetTest(unittest.TestCase):
         self.temporary.cleanup()
 
     def _dataset(self):
-        from pyclad.video import CommandUcfCrimeDataset
+        from pyclad.video.datasets.command_ucf_crime import CommandUcfCrimeDataset
 
         return CommandUcfCrimeDataset(
             self.root,
@@ -62,7 +62,7 @@ class CommandUcfCrimeDatasetTest(unittest.TestCase):
         self.assertEqual([concept.name for concept in concepts], ["Abuse", "Arrest"])
         for concept in concepts:
             self.assertEqual(concept.features.shape, (4, 2048))
-            self.assertEqual(concept.strategy_matrix().shape, (4, 2050))
+            self.assertEqual(concept.data.shape, (4, 2050))
             self.assertEqual(
                 {window.payload["record_index"] for window in concept.windows},
                 {0, 1},

@@ -25,14 +25,6 @@ class CommandNetworkOutput:
     anomaly_distance: Tensor
 
 
-@dataclass
-class NormalOnlyCommandNetworkOutput:
-    """Per-window outputs from COMMAND's normal-only ablation."""
-
-    embeddings: Tensor
-    normal_distance: Tensor
-
-
 class AugmentedFeatureFusion(nn.Module):
     """Fuse raw, local-context, and temporal-change feature branches."""
 
@@ -142,27 +134,6 @@ class DualPrototypeMemory(nn.Module):
         return (weights * cosine_distance).sum(dim=-1)
 
 
-class NormalPrototypeMemory(nn.Module):
-    """A single trainable nominal memory for positive-class-free training."""
-
-    def __init__(self, embedding_dim: int, memory_size: int, temperature: float = 0.1):
-        super().__init__()
-        if memory_size <= 0:
-            raise ValueError("memory_size must be positive")
-        if temperature <= 0:
-            raise ValueError("temperature must be positive")
-        self.prototypes = nn.Parameter(torch.empty(memory_size, embedding_dim))
-        self.temperature = float(temperature)
-        nn.init.xavier_uniform_(self.prototypes)
-
-    def forward(self, embeddings: Tensor) -> Tensor:
-        normalized_embeddings = F.normalize(embeddings, dim=-1)
-        normalized_memory = F.normalize(self.prototypes, dim=-1)
-        cosine_distance = 1.0 - torch.einsum("btd,md->btm", normalized_embeddings, normalized_memory)
-        weights = torch.softmax(-cosine_distance / self.temperature, dim=-1)
-        return (weights * cosine_distance).sum(dim=-1)
-
-
 class CommandNetwork(nn.Module):
     """COMMAND feature fusion, temporal modelling, and dual-memory scorer."""
 
@@ -211,46 +182,4 @@ class CommandNetwork(nn.Module):
             embeddings=embeddings,
             normal_distance=normal_distance,
             anomaly_distance=anomaly_distance,
-        )
-
-
-class NormalOnlyCommandNetwork(nn.Module):
-    """COMMAND encoder with one nominal memory and no positive-class head."""
-
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int = 128,
-        embedding_dim: int = 128,
-        memory_size: int = 64,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        if input_dim <= 0 or hidden_dim <= 0 or embedding_dim <= 0:
-            raise ValueError("input_dim, hidden_dim, and embedding_dim must be positive")
-
-        self.input_dim = int(input_dim)
-        self.feature_fusion = AugmentedFeatureFusion(input_dim, hidden_dim)
-        self.temporal = SelectiveTemporalBlock(hidden_dim)
-        self.embedding = nn.Sequential(
-            nn.LayerNorm(hidden_dim),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, embedding_dim),
-        )
-        self.memory = NormalPrototypeMemory(embedding_dim, memory_size)
-
-    def forward(self, features: Tensor) -> NormalOnlyCommandNetworkOutput:
-        if features.ndim == 2:
-            features = features.unsqueeze(1)
-        if features.ndim != 3 or features.shape[-1] != self.input_dim:
-            raise ValueError(
-                f"COMMAND expects (rows, {self.input_dim}) or "
-                f"(batch, time, {self.input_dim}), got {tuple(features.shape)}"
-            )
-        fused = self.feature_fusion(features)
-        temporal = self.temporal(fused)
-        embeddings = self.embedding(temporal)
-        return NormalOnlyCommandNetworkOutput(
-            embeddings=embeddings,
-            normal_distance=self.memory(embeddings),
         )

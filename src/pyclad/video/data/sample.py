@@ -17,9 +17,6 @@ class VideoWindow:
     split: str = "test"
     label: Optional[int] = None
     anomaly_class: Optional[str] = None
-    concept_id: Optional[str] = None
-    domain_id: Optional[str] = None
-    timestamp: Optional[float] = None
     payload: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
