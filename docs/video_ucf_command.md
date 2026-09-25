@@ -1,66 +1,42 @@
 # UCF-Crime and COMMAND
 
-`pyclad.video` provides a focused workflow for continual video anomaly
-detection:
+`pyclad.video` implements a clean-room COMMAND recreation using precomputed
+RGB/flow features. It uses the same `Model`, `ConceptsDataset`,
+`ConceptIncrementalScenario`, `BaseMetric`, and output-writer contracts as
+other pyCLAD modalities.
 
-- UCF-Crime defines the benchmark and evaluation annotations.
-- COMMAND defines the recreated model family and continual task stream.
-- ContTrain++ provides complete-video replay and optimization.
-- Frame ROC-AUC and average precision provide detector evaluation.
+## Package layout
 
-## Benchmark split and continual stream
+Video follows the same data, model, strategy, callback, and metric organization
+as `pyclad.vision`, using existing folders:
 
-The package keeps two sources separate.
+- `data/command_ucf_crime.py` contains the dataset and archive reader;
+  `data/video_bag_concept.py` and `data/sample.py` hold the video data contracts.
+- `models/command/config.py` holds architecture, loss, and training settings;
+  `architecture.py` holds the neural networks; `command.py` holds the model,
+  composite loss, and complete-bag training/replay implementation.
+- `strategies/cont_train.py` connects the model to the core scenario.
+- `callbacks/video_frame_metric_callback.py` handles frame evaluation, using
+  `metrics/frame_score_utils.py` and the individual frame metric modules.
+- `prediction_results.py` holds the modality-specific prediction result.
 
-The official UCF-Crime anomaly-detection benchmark contains 1,610 unique
-training videos—800 normal and 810 anomalous—and 290 test videos—150 normal
-and 140 anomalous. Training labels are weak video-level labels; temporal
-annotations are used during test evaluation.
+Import `CommandModel` from `pyclad.video.models.command.command` and its
+configuration classes from `pyclad.video.models.command.config`. The example
+below uses these paths; the former `video.datasets` and COMMAND `model` modules
+have been removed.
 
-PyCLAD recreates the three-task 4/4/5 anomaly grouping reported in COMMAND
-Section IV-C:
+## Run the example
 
-| Task | Anomaly classes |
-| --- | --- |
-| T1 | Abuse, Arrest, Arson, Assault |
-| T2 | Burglary, Explosion, Fighting, RoadAccidents |
-| T3 | Robbery, Shooting, Shoplifting, Stealing, Vandalism |
-
-This stream is named `command-paper-recreation-4-4-5`. It is not presented
-as a universal UCF-Crime continual split, author code, or an exact numerical
-reproduction.
-
-## Relationship to pyCLAD core
-
-The video package follows the modality conventions used by `pyclad.vision`.
-`CommandUcfCrimeDataset` implements the core `Dataset` metadata contract and
-its `read_dataset()` returns a standard `ConceptsDataset`. Each
-`VideoBagConcept` stores complete video bags as object-array rows and keeps
-frame annotations outside the model inputs.
-
-The primary workflow composes `ConceptIncrementalScenario`,
-`ContTrainPlusPlusStrategy`, `VideoPredictionResults`, and
-`VideoFrameEvaluationCallback`. The core scenario owns iteration and callback
-ordering. Frame ROC-AUC and AP implement `BaseMetric`. The dedicated trainer
-owns COMMAND's bag losses, dual-memory updates, calibration, and replay.
-
-The compact `CommandVideoModel(TorchBackbone)` is an experimental baseline for
-ordinary strategies using `StandardRunner` and `TorchModelAdapter`. It is a
-different architecture from the full-bag paper recreation and must not be used
-to claim a COMMAND reproduction.
-
-## Install and audit
+From a source checkout:
 
 ```shell
 pip install -e '.[video]'
-
-pyclad-video ucf-audit \
-  --data-root /path/to/UCF-Crime \
-  --check-feature-arrays \
-  --output-json output/ucf-audit.json
+python examples/models/video/command_example.py /path/to/UCF-Crime \
+  --epochs 100 --device cuda --output command-results.json
 ```
 
-The adapter expects the COMMAND archive layout:
+The example saves frame ROC-AUC/AP matrices and a final model checkpoint.
+It expects this archive layout:
 
 ```text
 UCF-Crime/
@@ -72,68 +48,64 @@ UCF-Crime/
 └── test_anomalyv2.txt
 ```
 
-The audit verifies manifests, train/test overlap, RGB/flow pairing, feature
-shapes, and benchmark counts. It reports the official 1,610 unique training
-videos separately from the 1,620 COMMAND manifest rows. Ten normal paths are
-repeated in that manifest; the recreation retains them as distinct records
-without describing them as additional UCF-Crime videos.
+Each stream contains one finite `(32, 1024)` NumPy array per manifest row,
+located at `<stream>/<video-relative-path>.npy`. The reader rejects malformed
+features, unbalanced training manifests, duplicate test videos, and train/test
+overlap. Repeated training paths retain distinct bag identifiers, preserving
+the COMMAND release's 1,620 rows rather than deduplicating its 1,610 videos.
 
-## Run the recreation
+## Continual workflow
 
-```shell
-pyclad-video ucf-command \
-  --data-root /path/to/UCF-Crime \
-  --tasks T1,T2,T3 \
-  --epochs 100 \
-  --device cuda \
-  --checkpoint-root output/checkpoints \
-  --output-json output/command-ucf.json
-```
+The recreated Section IV-C stream groups anomaly classes as follows:
 
-Every video remains a complete `(time, 2048)` RGB/flow bag through AugFuseNet,
-TempMamba, MemDualNet, and ContTrain++. Replay is complete-bag replay rather
-than generic row replay. Dual-memory deviation is the primary anomaly score;
-the classifier score is reported only as a diagnostic.
+| Task | Classes |
+| --- | --- |
+| T1 | Abuse, Arrest, Arson, Assault |
+| T2 | Burglary, Explosion, Fighting, RoadAccidents |
+| T3 | Robbery, Shooting, Shoplifting, Stealing, Vandalism |
 
-Each task result records training diagnostics, frame-level evaluation,
-checkpoint location, archive audit, scenario provenance, architecture and
-loss configuration, runtime information, and the source commit SHA.
+Each class receives an equally sized, disjoint shard of the normal training
+rows. `read_dataset(max_videos_per_class=1)` limits training for smoke runs;
+the complete test split stays fixed after every task.
 
-The historical `command-paper` command remains callable as an unadvertised
-compatibility alias.
+`VideoBagConcept` keeps each video as one object-array row. Its frame labels
+remain outside the feature tensors. `CommandModel.fit()` performs ContTrain++
+training, retaining optimizer state and complete-bag replay across tasks;
+`ContTrainPlusPlusStrategy` connects it to the core scenario. Prediction
+returns bag maxima plus window scores. `VideoFrameMetricCallback` expands
+those scores to frames and reuses the core metric-matrix reporting. Checkpoints
+are saved explicitly through `model.save_checkpoint(path)`.
 
-## Programmatic scenario access
+The example composes the public classes directly; no video-specific CLI or
+experiment runner is required. Use `JsonOutputWriter` to serialize the model,
+dataset, strategy, and metric callbacks as in other pyCLAD examples.
 
-```python
-from pyclad.scenarios.concept_incremental import ConceptIncrementalScenario
-from pyclad.video.callbacks.frame_evaluation import VideoFrameEvaluationCallback
-from pyclad.video.datasets.command_ucf_crime import CommandUcfCrimeDataset
-from pyclad.video.models.command.paper_training import ContTrainPlusPlusTrainer
-from pyclad.video.strategies.cont_train import ContTrainPlusPlusStrategy
+## Recreation contract
 
-reader = CommandUcfCrimeDataset("/path/to/UCF-Crime")
-dataset = reader.read_dataset()
-strategy = ContTrainPlusPlusStrategy(ContTrainPlusPlusTrainer())
-callback = VideoFrameEvaluationCallback(strategy)
-ConceptIncrementalScenario(dataset, strategy, [callback]).run()
-results = callback.info()
-```
+The source is *COMMANDing anomalies: Continual video anomaly detection via
+dual-memory and temporal mamba modeling*,
+[DOI 10.1016/j.neucom.2026.132943](https://doi.org/10.1016/j.neucom.2026.132943).
+Published equations and tables take precedence; public experimental material
+informs settings left unspecified. This is not author code or a verified
+numerical reproduction.
 
-The supported stream is T1, T2, T3. Ordered subsets are accepted for smoke
-runs; duplicates and reordered tasks are rejected. The serializable protocol
-metadata in `ucf_crime.scenarios` describes task composition; execution uses
-the core scenario above. Historical research-variant metadata remains
-available for compatibility but is not an executable COMMAND workflow.
+The architecture retains 32 snippets through RGB/flow fusion, gated temporal
+state-space blocks, one-dimensional CBAM, and primary/secondary memory banks.
+Defaults use 2,048 feature dimensions, two `256 x 2048` memories, and a
+128-dimensional contrastive projection. The default network has 15,036,943
+trainable parameters. The objective combines weak MIL ranking, supervised
+contrastive, focal classification, anomaly separation, sparsity, smoothness,
+and score regularization. Dual-memory deviation supplies the anomaly scores.
 
-## Evidence boundary
+Training defaults are 100 epochs per task, batch size 32, replay batch size
+16, Adam at `1e-4`, secondary-memory learning rate `1e-5`, decay by 0.1 every
+10 epochs, and a 1,000-video replay buffer. Replay balances label, task, and
+anomaly-peak quartile. The task scheduler restarts while optimizer and replay
+state persist.
 
-Unit tests establish package behavior. A successful archive audit establishes
-the local data contract. A smoke run establishes execution mechanics. None of
-those results alone reproduces COMMAND's published numbers.
-
-A research reproduction claim requires full training under the declared
-configuration, repeated seeds, retained checkpoints and result files, and a
-comparison against the paper under an equivalent evaluator.
-
-See [COMMAND recreation contract](command_recreation.md) for the exact source
-precedence and implementation assumptions.
+The paper leaves temporal block count, CBAM settings, state/projection widths,
+dropout, differentiated memory rates, novelty threshold, and exact replacement
+rules incompletely specified. `CommandArchitectureConfig`, `CommandLossConfig`,
+and `CommandTrainerConfig` expose these assumptions; model metadata and
+checkpoints retain their values. Tests establish implementation behavior,
+not agreement with published benchmark numbers.

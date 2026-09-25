@@ -33,18 +33,9 @@ see [pyOD docs](https://pyod.readthedocs.io/en/latest/).
 
 #### Video anomaly detection
 
-The `pyclad.video` namespace provides a focused UCF-Crime workflow with a
-clean-room recreation of COMMAND and complete-bag ContTrain++ training:
-
-```shell
-pip install -e '.[video]'
-pyclad-video ucf-audit --data-root /path/to/UCF-Crime --check-feature-arrays
-pyclad-video ucf-command --data-root /path/to/UCF-Crime --tasks T1,T2,T3 --device cuda
-```
-
-The 4/4/5 continual stream is explicitly attributed to COMMAND Section IV-C;
-it is not presented as an official UCF-Crime split or as the authors' code.
-See the [UCF-Crime and COMMAND guide](docs/video_ucf_command.md).
+Install `pip install -e '.[video]'` for the UCF-Crime COMMAND recreation.
+See the [video guide](docs/video_ucf_command.md) and
+[example](examples/models/video/command_example.py) for the 4/4/5 workflow.
 
 ### Getting started
 

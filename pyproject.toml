@@ -62,9 +62,6 @@ ucad = [
     "segment-anything>=1.0",
 ]
 
-[project.scripts]
-pyclad-video = "pyclad.video.cli:main"
-
 [tool.black]
 line-length = 120
 
