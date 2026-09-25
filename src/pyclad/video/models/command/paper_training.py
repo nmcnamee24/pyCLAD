@@ -430,8 +430,11 @@ def bags_from_concept(
         )
         if len(indices) != expected_windows:
             raise ValueError(f"video bag {group_id!r} has {len(indices)} windows; expected {expected_windows}")
-        if weak_targets is not None:
-            labels = np.asarray(weak_targets, dtype=np.float32)[indices]
+        # Test matrices intentionally leave reserved weak-label columns empty.
+        # Resolve those bags from metadata, without adding labels to features.
+        targets = None if weak_targets is None else np.asarray(weak_targets, dtype=np.float32)[indices]
+        if targets is not None and not np.isnan(targets).all():
+            labels = targets
         elif all("weak_label" in concept.windows[index].payload for index in indices):
             labels = np.asarray(
                 [concept.windows[index].payload["weak_label"] for index in indices],

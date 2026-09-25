@@ -21,7 +21,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     """Run the selected video workflow."""
 
     parser = _parser()
-    arguments = parser.parse_args(argv)
+    arguments_list = list(sys.argv[1:] if argv is None else argv)
+    if arguments_list and arguments_list[0] == "command-paper":
+        arguments_list[0] = "ucf-command"
+    arguments = parser.parse_args(arguments_list)
     _set_global_seed(arguments.seed)
     if arguments.command == "ucf-audit":
         _run_ucf_audit(arguments)
@@ -58,14 +61,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_command_arguments(command)
 
-    legacy = commands.add_parser("command-paper", help=argparse.SUPPRESS)
-    _add_command_arguments(legacy)
-
-    # Keep the historical alias callable without advertising it as a second
-    # supported workflow in top-level help.
-    commands._choices_actions = [
-        choice for choice in commands._choices_actions if choice.dest in {"ucf-audit", "ucf-command"}
-    ]
     return parser
 
 
@@ -155,7 +150,6 @@ def _run_command_paper(arguments: argparse.Namespace) -> None:
     from pyclad.video.models.command.paper_training import (
         ContTrainPlusPlusTrainer,
         PaperCommandVideoModel,
-        bags_from_concept,
     )
     from pyclad.video.ucf_crime.audit import audit_command_ucf_crime
     from pyclad.video.ucf_crime.scenarios import build_command_ucf_crime_scenario
@@ -165,38 +159,24 @@ def _run_command_paper(arguments: argparse.Namespace) -> None:
         raise ValueError("COMMAND UCF-Crime archive preflight failed; run ucf-audit for details")
 
     dataset = CommandUcfCrimeDataset(arguments.data_root)
-    available = dataset.paper_training_tasks(max_videos_per_class=_limit(arguments.videos_per_class))
-    selected_names = _csv(arguments.tasks)
-    unknown = sorted(set(selected_names) - {task.name for task in available})
-    if unknown:
-        raise ValueError(f"unknown COMMAND recreation tasks: {unknown}")
-    tasks = tuple(task for task in available if task.name in selected_names)
+    from pyclad.scenarios.concept_incremental import ConceptIncrementalScenario
+    from pyclad.video.callbacks.frame_evaluation import VideoFrameEvaluationCallback
+    from pyclad.video.strategies.cont_train import ContTrainPlusPlusStrategy
 
-    config = _paper_trainer_config(arguments)
-    trainer = ContTrainPlusPlusTrainer(PaperCommandVideoModel(config.architecture), config)
-    test = dataset.test_concept(
+    stream = dataset.read_dataset(
+        tasks=_csv(arguments.tasks),
+        max_videos_per_class=_limit(arguments.videos_per_class),
         max_normal_videos=_limit(arguments.test_normal_videos),
         max_anomaly_videos=_limit(arguments.test_anomaly_videos),
     )
-    task_results = []
-    for task in tasks:
-        print(f"[COMMAND-RECREATION] training {task.name}", file=sys.stderr, flush=True)
-        task_bags = bags_from_concept(task, task_id=task.name)
-        training = trainer.fit_task(task_bags, task_id=task.name)
-        evaluation = _evaluate_paper_predictions(dataset, test, trainer)
-        checkpoint = None
-        if arguments.checkpoint_root is not None:
-            checkpoint_path = arguments.checkpoint_root.expanduser().resolve() / f"command-recreation-{task.name}.pt"
-            trainer.save_checkpoint(checkpoint_path)
-            checkpoint = str(checkpoint_path)
-        task_results.append(
-            {
-                "task": task.name,
-                "training": training,
-                "evaluation": evaluation,
-                "checkpoint": checkpoint,
-            }
-        )
+    config = _paper_trainer_config(arguments)
+    trainer = ContTrainPlusPlusTrainer(PaperCommandVideoModel(config.architecture), config)
+    strategy = ContTrainPlusPlusStrategy(trainer)
+    callback = VideoFrameEvaluationCallback(strategy, arguments.checkpoint_root)
+    ConceptIncrementalScenario(stream, strategy, [callback]).run()
+    tasks = stream.train_concepts()
+    test = stream.test_concepts()[0]
+    task_results = [{**result, "evaluation": result["evaluation"][test.name]} for result in callback.task_results]
 
     _emit_json(
         {
@@ -215,42 +195,15 @@ def _run_command_paper(arguments: argparse.Namespace) -> None:
                 "classifier_score": "diagnostic only",
             },
             "trainer": trainer.metadata(),
-            "train_manifest_records": sum(len(bags_from_concept(task, task_id=task.name)) for task in tasks),
-            "train_unique_video_ids": len({window.video_id for task in tasks for window in task.windows}),
-            "test_videos": len({window.video_id for window in test.windows}),
+            "train_manifest_records": sum(len(task.data) for task in tasks),
+            "train_unique_video_ids": len(
+                {window.video_id for task in tasks for bag in task.data for window in bag.windows}
+            ),
+            "test_videos": len(test.frame_labels),
             "task_results": task_results,
         },
         arguments,
     )
-
-
-def _evaluate_paper_predictions(dataset, test, trainer) -> dict[str, object]:
-    from pyclad.video.metrics.frame import (
-        compute_video_frame_metrics,
-        window_scores_to_frame_scores,
-    )
-    from pyclad.video.models.command.paper_training import bags_from_concept
-
-    bags = bags_from_concept(test, task_id="test")
-    predictions = trainer.predict_bags(bags)
-    windows = tuple(window for bag in bags for window in bag.windows)
-    selected_ids = {bag.bag_id for bag in bags}
-    labels = {video_id: values for video_id, values in dataset.frame_labels("test").items() if video_id in selected_ids}
-    frame_counts = {video_id: len(values) for video_id, values in labels.items()}
-    anomaly_frames = window_scores_to_frame_scores(
-        windows,
-        predictions["anomaly_scores"].reshape(-1),
-        frame_counts,
-    )
-    classifier_frames = window_scores_to_frame_scores(
-        windows,
-        predictions["classifier_scores"].reshape(-1),
-        frame_counts,
-    )
-    return {
-        "ddm": compute_video_frame_metrics(anomaly_frames, labels).as_dict(),
-        "classifier_diagnostic": compute_video_frame_metrics(classifier_frames, labels).as_dict(),
-    }
 
 
 def _default_torch_device() -> str:

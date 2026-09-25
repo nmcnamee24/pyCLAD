@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from typing import Dict, Mapping, Sequence
 
 import numpy as np
-from sklearn.metrics import average_precision_score, roc_auc_score
 
 from pyclad.video.data.sample import VideoWindow
+from pyclad.video.metrics.frame_average_precision import FrameAveragePrecision
+from pyclad.video.metrics.frame_roc_auc import FrameRocAuc
 
 
 def window_scores_to_frame_scores(
@@ -102,15 +103,15 @@ def compute_video_frame_metrics(
     normal_scores = y_score[y_true == 0]
     anomaly_scores = y_score[y_true == 1]
     return VideoFrameMetrics(
-        auc=_binary_metric(roc_auc_score, y_true, y_score),
-        ap=_binary_metric(average_precision_score, y_true, y_score),
+        auc=_binary_metric(FrameRocAuc(), y_true, y_score),
+        ap=_binary_metric(FrameAveragePrecision(), y_true, y_score),
         auc_anomalous_videos=_binary_metric(
-            roc_auc_score,
+            FrameRocAuc(),
             flatten_video_curves(anomalous_labels).astype(np.int64),
             flatten_video_curves(anomalous_scores),
         ),
         ap_anomalous_videos=_binary_metric(
-            average_precision_score,
+            FrameAveragePrecision(),
             flatten_video_curves(anomalous_labels).astype(np.int64),
             flatten_video_curves(anomalous_scores),
         ),
@@ -134,7 +135,7 @@ def _validate_matching_videos(
 def _binary_metric(metric, y_true: np.ndarray, y_score: np.ndarray) -> float:
     if len(y_true) == 0 or len(np.unique(y_true)) < 2:
         return float("nan")
-    return float(metric(y_true=y_true, y_score=y_score))
+    return metric.compute(y_true=y_true, anomaly_scores=y_score, y_pred=None)
 
 
 def _snr(normal_scores: np.ndarray, anomaly_scores: np.ndarray) -> float:

@@ -42,17 +42,21 @@ The video layer follows the same pattern as `pyclad.vision`:
 `CommandVideoModel` implements a compact, strategy-compatible COMMAND model
 for comparisons with pyCLAD's regular PyTorch strategies. Wrap it in the
 existing `TorchModelAdapter` for strategies that consume the ordinary
-`Model.fit()` interface. The primary `ucf-command` workflow uses
-`PaperCommandVideoModel` and `ContTrainPlusPlusTrainer`, which retain complete
-`(video, time, feature)` bags through training and replay.
+`Model.fit()` interface. The primary `ucf-command` workflow runs a core `ConceptIncrementalScenario`
+with `ContTrainPlusPlusStrategy` and `VideoFrameEvaluationCallback`. The
+strategy delegates whole-bag optimization to `ContTrainPlusPlusTrainer`;
+`PaperCommandVideoModel` is its PyTorch network. It retains complete
+`(video, time, feature)` bags through training and replay. The compact model
+is an experimental baseline, not the paper recreation.
 
 ```python
 from pyclad.models.adapters.torch_adapter import TorchModelAdapter
+from pyclad.models.training.runners.standard import StandardRunner
 from pyclad.strategies.baselines.naive import NaiveStrategy
 from pyclad.video.models.command.model import CommandVideoModel
 
 backbone = CommandVideoModel(feature_dim=2048)
-model = TorchModelAdapter(backbone, epochs=10, batch_size=32)
+model = TorchModelAdapter(backbone, runner=StandardRunner(max_epochs=10), batch_size=32)
 strategy = NaiveStrategy(model)
 ```
 

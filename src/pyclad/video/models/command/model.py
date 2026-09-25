@@ -65,8 +65,7 @@ class CommandVideoModel(TorchBackbone):
         self.learning_rate = float(learning_rate)
         self.weight_decay = float(weight_decay)
         self.threshold = float(threshold)
-        self._device = torch.device(device)
-        self.module.to(self._device)
+        self.to(torch.device(device))
 
     def get_module(self) -> nn.Module:
         return self.module
@@ -88,10 +87,14 @@ class CommandVideoModel(TorchBackbone):
 
     def predict(self, data: np.ndarray) -> PredictionResults:
         matrix = self._validate_matrix(data, allow_features_only=True)
+        was_training = self.module.training
         self.module.eval()
-        with torch.no_grad():
-            batch = torch.as_tensor(matrix, dtype=torch.float32, device=self._device)
-            anomaly_scores = torch.sigmoid(self.forward(batch)).reshape(-1).cpu().numpy()
+        try:
+            with torch.no_grad():
+                batch = torch.as_tensor(matrix, dtype=torch.float32, device=self.device())
+                anomaly_scores = torch.sigmoid(self.forward(batch)).reshape(-1).cpu().numpy()
+        finally:
+            self.module.train(was_training)
 
         anomaly_scores = anomaly_scores.astype(np.float64, copy=False)
         return PredictionResults(
@@ -110,7 +113,7 @@ class CommandVideoModel(TorchBackbone):
             "threshold": self.threshold,
             "learning_rate": self.learning_rate,
             "weight_decay": self.weight_decay,
-            "device": str(self._device),
+            "device": str(self.device()),
             "architecture": {
                 "hidden_dim": self.module.feature_fusion.raw_projection.out_features,
                 "embedding_dim": self.module.embedding[-1].out_features,
@@ -144,7 +147,7 @@ class CommandVideoModel(TorchBackbone):
                 f"{self.strategy_schema.matrix_width}, got {matrix.shape[-1]}"
             )
 
-        matrix = matrix.to(self._device)
+        matrix = matrix.to(self.device())
         features = matrix[..., : self.feature_dim]
         target_shape = features.shape[:-1]
         labels = torch.full(target_shape, float("nan"), dtype=features.dtype, device=features.device)

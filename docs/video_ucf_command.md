@@ -32,15 +32,22 @@ reproduction.
 
 ## Relationship to pyCLAD core
 
-`pyclad.video` is a sibling of `pyclad.vision`, not a second framework. Its
-`VideoConcept` extends the regular `Concept` with aligned temporal windows,
-and `CommandVideoModel` directly implements the existing `TorchBackbone`
-interface. Ordinary strategies reuse `TorchModelAdapter`; no video-specific
-strategy or model adapter is required.
+The video package follows the modality conventions used by `pyclad.vision`.
+`CommandUcfCrimeDataset` implements the core `Dataset` metadata contract and
+its `read_dataset()` returns a standard `ConceptsDataset`. Each
+`VideoBagConcept` stores complete video bags as object-array rows and keeps
+frame annotations outside the model inputs.
 
-The paper recreation remains a small deliberate exception because generic
-pyCLAD strategies batch matrix rows, while COMMAND and ContTrain++ train and
-replay variable-length, complete-video bags.
+The primary workflow composes `ConceptIncrementalScenario`,
+`ContTrainPlusPlusStrategy`, `VideoPredictionResults`, and
+`VideoFrameEvaluationCallback`. The core scenario owns iteration and callback
+ordering. Frame ROC-AUC and AP implement `BaseMetric`. The dedicated trainer
+owns COMMAND's bag losses, dual-memory updates, calibration, and replay.
+
+The compact `CommandVideoModel(TorchBackbone)` is an experimental baseline for
+ordinary strategies using `StandardRunner` and `TorchModelAdapter`. It is a
+different architecture from the full-bag paper recreation and must not be used
+to claim a COMMAND reproduction.
 
 ## Install and audit
 
@@ -98,18 +105,25 @@ compatibility alias.
 ## Programmatic scenario access
 
 ```python
-from pyclad.video.ucf_crime.scenarios import build_command_ucf_crime_scenario
+from pyclad.scenarios.concept_incremental import ConceptIncrementalScenario
+from pyclad.video.callbacks.frame_evaluation import VideoFrameEvaluationCallback
+from pyclad.video.datasets.command_ucf_crime import CommandUcfCrimeDataset
+from pyclad.video.models.command.paper_training import ContTrainPlusPlusTrainer
+from pyclad.video.strategies.cont_train import ContTrainPlusPlusStrategy
 
-primary = build_command_ucf_crime_scenario()
-classwise = build_command_ucf_crime_scenario("classwise")
-shooting_last = build_command_ucf_crime_scenario(
-    "12-1",
-    held_out_class="Shooting",
-)
+reader = CommandUcfCrimeDataset("/path/to/UCF-Crime")
+dataset = reader.read_dataset()
+strategy = ContTrainPlusPlusStrategy(ContTrainPlusPlusTrainer())
+callback = VideoFrameEvaluationCallback(strategy)
+ConceptIncrementalScenario(dataset, strategy, [callback]).run()
+results = callback.info()
 ```
 
-`classwise` and `12-1` are controlled PyCLAD research variants. They are
-not COMMAND protocols and do not replace the official benchmark split.
+The supported stream is T1, T2, T3. Ordered subsets are accepted for smoke
+runs; duplicates and reordered tasks are rejected. The serializable protocol
+metadata in `ucf_crime.scenarios` describes task composition; execution uses
+the core scenario above. Historical research-variant metadata remains
+available for compatibility but is not an executable COMMAND workflow.
 
 ## Evidence boundary
 

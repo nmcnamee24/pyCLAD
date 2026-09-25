@@ -15,6 +15,9 @@ from typing import Dict, Iterable, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
+from pyclad.data.dataset import Dataset
+from pyclad.data.datasets.concepts_dataset import ConceptsDataset
+from pyclad.video.data.bag_concept import VideoBagConcept
 from pyclad.video.data.matrix import VideoStrategySchema
 from pyclad.video.data.sample import VideoWindow
 from pyclad.video.data.video_concept import VideoConcept
@@ -60,7 +63,7 @@ class CommandUcfCrimeRecord:
         return self.relative_path
 
 
-class CommandUcfCrimeDataset:
+class CommandUcfCrimeDataset(Dataset):
     """Load the exact UCF-Crime feature layout published with COMMAND.
 
     Training concepts are balanced continual experiences: each anomaly class
@@ -144,6 +147,48 @@ class CommandUcfCrimeDataset:
 
     def name(self) -> str:
         return self._dataset_name
+
+    def read_dataset(
+        self,
+        *,
+        tasks: Sequence[str] = ("T1", "T2", "T3"),
+        max_videos_per_class: Optional[int] = None,
+        max_normal_videos: Optional[int] = None,
+        max_anomaly_videos: Optional[int] = None,
+    ) -> ConceptsDataset:
+        """Build the 4-4-5 stream for the core ConceptIncrementalScenario.
+
+        Like vision readers, materialize a ConceptsDataset. Its object-array
+        rows contain whole bags so temporal ordering and replay remain intact.
+        """
+        from pyclad.video.models.command.paper_training import bags_from_concept
+
+        selected = tuple(tasks)
+        if not selected or len(set(selected)) != len(selected) or any(t not in ("T1", "T2", "T3") for t in selected):
+            raise ValueError("tasks must be a non-empty, unique selection of T1, T2, T3")
+        if selected != tuple(t for t in ("T1", "T2", "T3") if t in selected):
+            raise ValueError("tasks must follow the COMMAND T1, T2, T3 order")
+        train = []
+        for concept in self.paper_training_tasks(max_videos_per_class=max_videos_per_class):
+            if concept.name in selected:
+                bags = bags_from_concept(concept)
+                train.append(
+                    VideoBagConcept(
+                        name=concept.name,
+                        data=np.asarray(bags, dtype=object),
+                        labels=np.asarray([bag.weak_label for bag in bags]),
+                    )
+                )
+        concept = self.test_concept(max_normal_videos=max_normal_videos, max_anomaly_videos=max_anomaly_videos)
+        bags = bags_from_concept(concept, task_id="test")
+        video_ids = {window.video_id for bag in bags for window in bag.windows}
+        test = VideoBagConcept(
+            name=concept.name,
+            data=np.asarray(bags, dtype=object),
+            labels=np.asarray([bag.weak_label for bag in bags]),
+            frame_labels={key: value for key, value in self.frame_labels().items() if key in video_ids},
+        )
+        return ConceptsDataset(self.name(), train, [test])
 
     def frame_labels(self, split: str = "test") -> Dict[str, np.ndarray]:
         if split != "test":

@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import importlib.util
-import unittest
 
 import numpy as np
+import pytest
+
+from pyclad.models.training.runners.standard import StandardRunner
 
 TORCH_AVAILABLE = importlib.util.find_spec("torch") is not None
 
 
-@unittest.skipUnless(TORCH_AVAILABLE, "COMMAND requires the optional torch dependency")
-class CommandVideoModelTest(unittest.TestCase):
-    def setUp(self):
+@pytest.mark.skipif(not TORCH_AVAILABLE, reason="COMMAND requires the optional torch dependency")
+class TestCommandVideoModel:
+
+    def setup_method(self):
         import torch
 
         torch.manual_seed(3)
@@ -25,21 +28,9 @@ class CommandVideoModelTest(unittest.TestCase):
         from pyclad.video.models.command.model import CommandVideoModel
 
         schema = VideoStrategySchema(4, target_names=("weak_label", "bag_id"))
-        matrix = schema.pack(
-            self.features,
-            {
-                "weak_label": self.labels,
-                "bag_id": np.repeat([0.0, 1.0], 5),
-            },
-        )
-        model = CommandVideoModel(
-            4,
-            strategy_schema=schema,
-            hidden_dim=8,
-            embedding_dim=6,
-            memory_size=4,
-        )
-        return model, matrix
+        matrix = schema.pack(self.features, {"weak_label": self.labels, "bag_id": np.repeat([0.0, 1.0], 5)})
+        model = CommandVideoModel(4, strategy_schema=schema, hidden_dim=8, embedding_dim=6, memory_size=4)
+        return (model, matrix)
 
     def test_regular_fit_predict_contract(self):
         from pyclad.models.adapters.torch_adapter import TorchModelAdapter
@@ -47,29 +38,22 @@ class CommandVideoModelTest(unittest.TestCase):
         from pyclad.strategies.baselines.naive import NaiveStrategy
 
         backbone, matrix = self._model_and_matrix()
-        model = TorchModelAdapter(backbone, epochs=1, batch_size=5)
+        model = TorchModelAdapter(backbone, runner=StandardRunner(max_epochs=1), batch_size=5)
         NaiveStrategy(model).learn(matrix)
         prediction = model.predict(self.features)
-
-        self.assertIsInstance(backbone, TorchBackbone)
-        self.assertEqual(prediction.anomaly_scores.shape, (10,))
-        self.assertTrue(np.isfinite(prediction.anomaly_scores).all())
-        self.assertTrue(((prediction.anomaly_scores >= 0) & (prediction.anomaly_scores <= 1)).all())
+        assert isinstance(backbone, TorchBackbone)
+        assert prediction.anomaly_scores.shape == (10,)
+        assert np.isfinite(prediction.anomaly_scores).all()
+        assert ((prediction.anomaly_scores >= 0) & (prediction.anomaly_scores <= 1)).all()
 
     def test_ewc_uses_unchanged_tensor_backbone_contract(self):
         from pyclad.strategies.regularization.ewc import EWCStrategy
 
         model, matrix = self._model_and_matrix()
-        strategy = EWCStrategy(
-            model,
-            epochs=1,
-            batch_size=5,
-            fisher_batch_size=5,
-        )
+        strategy = EWCStrategy(model, runner=StandardRunner(max_epochs=1), batch_size=5, fisher_batch_size=5)
         strategy.learn(matrix)
         prediction = strategy.predict(self.features)
-
-        self.assertEqual(prediction.anomaly_scores.shape, (10,))
+        assert prediction.anomaly_scores.shape == (10,)
 
     def test_lwf_agem_and_der_use_unchanged_tensor_contract(self):
         from pyclad.strategies.regularization.der import DerPlusPlus
@@ -78,28 +62,17 @@ class CommandVideoModelTest(unittest.TestCase):
         from pyclad.strategies.replay.buffers.reservoir import ReservoirBuffer
 
         factories = [
-            lambda model: LwFStrategy(model, epochs=1, batch_size=5),
+            lambda model: LwFStrategy(model, runner=StandardRunner(max_epochs=1), batch_size=5),
             lambda model: AGEMStrategy(
-                model,
-                ReservoirBuffer(max_capacity=8),
-                epochs=1,
-                batch_size=5,
+                model, buffer=ReservoirBuffer(max_capacity=8), runner=StandardRunner(max_epochs=1), batch_size=5
             ),
             lambda model: DerPlusPlus(
-                model=model,
-                buffer=ReservoirBuffer(max_capacity=8),
-                epochs=1,
-                batch_size=5,
+                model=model, buffer=ReservoirBuffer(max_capacity=8), runner=StandardRunner(max_epochs=1), batch_size=5
             ),
         ]
         for factory in factories:
-            with self.subTest(strategy=factory):
-                model, matrix = self._model_and_matrix()
-                strategy = factory(model)
-                strategy.learn(matrix[:5])
-                strategy.learn(matrix[5:])
-                self.assertEqual(strategy.predict(self.features).anomaly_scores.shape, (10,))
-
-
-if __name__ == "__main__":
-    unittest.main()
+            model, matrix = self._model_and_matrix()
+            strategy = factory(model)
+            strategy.learn(matrix[:5])
+            strategy.learn(matrix[5:])
+            assert strategy.predict(self.features).anomaly_scores.shape == (10,)
