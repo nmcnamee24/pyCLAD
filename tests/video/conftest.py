@@ -1,4 +1,4 @@
-"""Keep video reproducibility tests from changing other modalities' RNG state."""
+"""Keep video model tests from changing other modalities' RNG state."""
 
 import os
 import random
@@ -9,7 +9,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def restore_random_state():
-    """Restore the process-wide state modified by the public CLI seed helper."""
+    """Restore the process-wide state modified while constructing and training test models."""
     import torch
 
     python_state = random.getstate()

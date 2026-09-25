@@ -1,132 +1,27 @@
-"""Bag-aware optimization for PyCLAD's COMMAND paper recreation.
-
-The regular pyCLAD strategy interface intentionally operates on two-dimensional
-row matrices.  COMMAND's paper architecture instead requires complete
-32-snippet video bags, so this module owns its replay and training loop rather
-than silently flattening temporal sequences through a generic strategy.
-"""
+"""COMMAND model with complete-bag ContTrain++ optimization and replay."""
 
 from __future__ import annotations
 
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, Iterable, Literal, Mapping, Sequence, Tuple
+from typing import Dict, Iterable, Mapping, Sequence, Tuple
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch import Tensor, nn
+from torch import Tensor
 
-from pyclad.video.data.sample import VideoWindow
-from pyclad.video.data.video_concept import VideoConcept
-from pyclad.video.models.command.paper_architecture import (
-    PaperAugFuseNet,
-    PaperCommandArchitectureConfig,
-    PaperCommandNetwork,
-    PaperCommandOutput,
-    PaperTempMamba,
-)
-
-
-@dataclass(frozen=True)
-class PaperCommandLossConfig:
-    """Published composite weights plus explicitly documented paper-silent defaults."""
-
-    mil_weight: float = 1.0
-    contrastive_weight: float = 1.0
-    focal_weight: float = 0.5
-    anomaly_separation_weight: float = 0.3
-    contrastive_temperature: float = 0.15
-    mil_margin: float = 2.0
-    focal_alpha: float = 0.25
-    focal_gamma: float = 2.5
-    anomaly_margin: float = 1.0
-    sparsity_weight: float = 8e-5
-    smoothness_weight: float = 8e-5
-    score_l2_weight: float = 5e-5
-
-    def __post_init__(self) -> None:
-        values = asdict(self)
-        for name, value in values.items():
-            if name == "focal_alpha":
-                if not 0.0 <= value <= 1.0:
-                    raise ValueError("focal_alpha must be in [0, 1]")
-            elif value < 0.0:
-                raise ValueError(f"{name} must be non-negative")
-        if self.contrastive_temperature == 0.0:
-            raise ValueError("contrastive_temperature must be positive")
-
-
-@dataclass(frozen=True)
-class PaperCommandTrainerConfig:
-    """Optimization, replay, and reproducibility settings for ContTrain++."""
-
-    architecture: PaperCommandArchitectureConfig = field(default_factory=PaperCommandArchitectureConfig)
-    loss: PaperCommandLossConfig = field(default_factory=PaperCommandLossConfig)
-    epochs: int = 100
-    batch_size: int = 32
-    replay_batch_size: int = 16
-    buffer_size: int = 1_000
-    learning_rate: float = 1e-4
-    secondary_memory_learning_rate: float = 1e-5
-    gradient_clip: float = 1.0
-    lr_step_size: int = 10
-    lr_gamma: float = 0.1
-    novelty_mad_scale: float = 3.0
-    novelty_warmup_epochs: int = 1
-    seed: int = 42
-    device: str = "cpu"
-
-    def __post_init__(self) -> None:
-        integer_fields = {
-            "epochs": self.epochs,
-            "batch_size": self.batch_size,
-            "buffer_size": self.buffer_size,
-            "lr_step_size": self.lr_step_size,
-        }
-        for name, value in integer_fields.items():
-            if value <= 0:
-                raise ValueError(f"{name} must be positive")
-        if not 0 <= self.replay_batch_size < self.batch_size:
-            raise ValueError("replay_batch_size must be in [0, batch_size)")
-        if self.learning_rate <= 0 or self.secondary_memory_learning_rate <= 0:
-            raise ValueError("learning rates must be positive")
-        if self.gradient_clip <= 0 or self.lr_gamma <= 0:
-            raise ValueError("gradient_clip and lr_gamma must be positive")
-        if self.novelty_mad_scale < 0 or self.novelty_warmup_epochs < 0:
-            raise ValueError("novelty controls must be non-negative")
-
-
-@dataclass(frozen=True)
-class PaperVideoBag:
-    """One complete video bag retained by the paper trainer and replay buffer."""
-
-    bag_id: str
-    task_id: str
-    features: np.ndarray
-    weak_label: int
-    windows: Tuple[VideoWindow, ...] = ()
-
-    def __post_init__(self) -> None:
-        features = np.asarray(self.features, dtype=np.float32)
-        if not self.bag_id or not self.task_id:
-            raise ValueError("bag_id and task_id must be non-empty")
-        if features.ndim != 2 or features.shape[1] <= 0:
-            raise ValueError(f"paper COMMAND bags must have shape (time, features), got {features.shape}")
-        if len(features) == 0 or not np.isfinite(features).all():
-            raise ValueError("paper COMMAND bag features must be finite and non-empty")
-        if self.weak_label not in {0, 1}:
-            raise ValueError("weak_label must be zero or one")
-        if self.windows and len(self.windows) != len(features):
-            raise ValueError("windows and bag features must have the same temporal length")
-        object.__setattr__(self, "features", features)
-        object.__setattr__(self, "windows", tuple(self.windows))
+from pyclad.models.model import Model
+from pyclad.video.data.sample import VideoBag
+from pyclad.video.models.command.architecture import CommandOutput, CommandVideoNetwork
+from pyclad.video.models.command.config import CommandLossConfig, CommandTrainerConfig
+from pyclad.video.prediction_results import VideoPredictionResults
 
 
 @dataclass(frozen=True)
 class ReplayEntry:
-    bag: PaperVideoBag
+    bag: VideoBag
     score_curve: np.ndarray
 
     def __post_init__(self) -> None:
@@ -168,7 +63,7 @@ class ContTrainReplayBuffer:
             retained = self._balanced_select(self.entries, self.max_size)
             self._entries = {entry.bag.bag_id: entry for entry in retained}
 
-    def sample(self, count: int, *, exclude_bag_ids: Iterable[str] = ()) -> Tuple[PaperVideoBag, ...]:
+    def sample(self, count: int, *, exclude_bag_ids: Iterable[str] = ()) -> Tuple[VideoBag, ...]:
         if count <= 0:
             return ()
         excluded = set(exclude_bag_ids)
@@ -240,7 +135,7 @@ class ContTrainReplayBuffer:
             raise ValueError("checkpoint replay capacity does not match trainer configuration")
         self._entries.clear()
         for item in state["entries"]:
-            bag = PaperVideoBag(
+            bag = VideoBag(
                 bag_id=str(item["bag_id"]),
                 task_id=str(item["task_id"]),
                 features=np.asarray(item["features"], dtype=np.float32),
@@ -250,64 +145,8 @@ class ContTrainReplayBuffer:
             self._entries[bag.bag_id] = entry
 
 
-@dataclass
-class PaperNormalOnlyOutput:
-    temporal_features: Tensor
-    nearest_distance: Tensor
-    nearest_slot: Tensor
-
-
-class PaperNormalOnlyNetwork(nn.Module):
-    """Paper encoder with one normal bank and no binary anomaly classifier."""
-
-    def __init__(self, config: PaperCommandArchitectureConfig):
-        super().__init__()
-        self.config = config
-        self.feature_fusion = PaperAugFuseNet(config.appearance_dim, config.motion_dim)
-        self.temporal = PaperTempMamba(config)
-        self.normal_memory = nn.Parameter(torch.empty(config.memory_size, config.fused_dim))
-        nn.init.normal_(self.normal_memory, mean=0.0, std=0.01)
-
-    def forward(self, appearance: Tensor, motion: Tensor) -> PaperNormalOnlyOutput:
-        temporal = self.temporal(self.feature_fusion(appearance, motion))
-        distances = torch.cdist(temporal, self.normal_memory.unsqueeze(0))
-        nearest_distance, nearest_slot = distances.min(dim=-1)
-        return PaperNormalOnlyOutput(temporal, nearest_distance, nearest_slot)
-
-
-class PaperCommandVideoModel(nn.Module):
-    """High-level model that accepts only complete 2048-D video bags."""
-
-    def __init__(
-        self,
-        architecture: PaperCommandArchitectureConfig | None = None,
-        *,
-        mode: Literal["dual-memory", "normal-only"] = "dual-memory",
-    ):
-        super().__init__()
-        self.architecture = architecture or PaperCommandArchitectureConfig()
-        if mode not in {"dual-memory", "normal-only"}:
-            raise ValueError("mode must be 'dual-memory' or 'normal-only'")
-        self.mode = mode
-        self.network: PaperCommandNetwork | PaperNormalOnlyNetwork
-        if mode == "dual-memory":
-            self.network = PaperCommandNetwork(self.architecture)
-        else:
-            self.network = PaperNormalOnlyNetwork(self.architecture)
-
-    def forward(self, bags: Tensor, *, track_memory_usage: bool = False):
-        expected = self.architecture.fused_dim
-        if bags.ndim != 3 or bags.shape[-1] != expected:
-            raise ValueError(f"paper COMMAND input must have shape (batch, time, {expected}), got {tuple(bags.shape)}")
-        appearance = bags[..., : self.architecture.appearance_dim]
-        motion = bags[..., self.architecture.appearance_dim :]
-        if self.mode == "dual-memory":
-            return self.network(appearance, motion, track_memory_usage=track_memory_usage)
-        return self.network(appearance, motion)
-
-
 @dataclass(frozen=True)
-class PaperCommandLossBreakdown:
+class CommandLossBreakdown:
     total: Tensor
     mil: Tensor
     contrastive: Tensor
@@ -321,14 +160,14 @@ class PaperCommandLossBreakdown:
         return {name: float(value.detach().cpu()) for name, value in self.__dict__.items()}
 
 
-def paper_command_composite_loss(
-    output: PaperCommandOutput,
+def command_composite_loss(
+    output: CommandOutput,
     weak_labels: Tensor,
-    config: PaperCommandLossConfig | None = None,
-) -> PaperCommandLossBreakdown:
+    config: CommandLossConfig | None = None,
+) -> CommandLossBreakdown:
     """Compute COMMAND's MIL, contrastive, focal, and separation objective."""
 
-    config = config or PaperCommandLossConfig()
+    config = config or CommandLossConfig()
     labels = weak_labels.to(dtype=output.logits.dtype).reshape(-1)
     if output.logits.ndim != 2 or len(labels) != output.logits.shape[0]:
         raise ValueError("weak_labels must provide one value per video bag")
@@ -374,7 +213,7 @@ def paper_command_composite_loss(
         + config.anomaly_separation_weight * separation
         + config.score_l2_weight * score_l2
     )
-    return PaperCommandLossBreakdown(
+    return CommandLossBreakdown(
         total=total,
         mil=mil,
         contrastive=contrastive,
@@ -402,71 +241,16 @@ def _supervised_info_nce(projections: Tensor, labels: Tensor, temperature: float
     return -mean_positive_log_prob[valid].mean()
 
 
-def bags_from_concept(
-    concept: VideoConcept,
-    *,
-    task_id: str | None = None,
-    expected_windows: int = 32,
-) -> Tuple[PaperVideoBag, ...]:
-    """Recover complete bags from a video concept without using row strategy matrices."""
-
-    if concept.features.shape[1] != 2048:
-        raise ValueError(
-            f"paper COMMAND requires 2048-D RGB+flow features; {concept.name!r} has {concept.features.shape[1]}"
-        )
-    groups: Dict[str, list[int]] = {}
-    for index, window in enumerate(concept.windows):
-        group_id = str(window.payload.get("record_instance_id", window.video_id))
-        groups.setdefault(group_id, []).append(index)
-    weak_targets = concept.strategy_targets.get("weak_label")
-    bags = []
-    for group_id in sorted(groups):
-        indices = sorted(
-            groups[group_id],
-            key=lambda index: (
-                int(concept.windows[index].payload.get("window_index", index)),
-                concept.windows[index].start_frame,
-            ),
-        )
-        if len(indices) != expected_windows:
-            raise ValueError(f"video bag {group_id!r} has {len(indices)} windows; expected {expected_windows}")
-        # Test matrices intentionally leave reserved weak-label columns empty.
-        # Resolve those bags from metadata, without adding labels to features.
-        targets = None if weak_targets is None else np.asarray(weak_targets, dtype=np.float32)[indices]
-        if targets is not None and not np.isnan(targets).all():
-            labels = targets
-        elif all("weak_label" in concept.windows[index].payload for index in indices):
-            labels = np.asarray(
-                [concept.windows[index].payload["weak_label"] for index in indices],
-                dtype=np.float32,
-            )
-        else:
-            labels = np.asarray([concept.windows[index].label for index in indices], dtype=np.float32)
-            labels = np.full_like(labels, np.nanmax(labels))
-        if not np.isfinite(labels).all() or len(np.unique(labels)) != 1:
-            raise ValueError(f"video bag {group_id!r} must resolve to one finite weak label")
-        bags.append(
-            PaperVideoBag(
-                bag_id=group_id,
-                task_id=task_id or concept.name,
-                features=concept.features[indices],
-                weak_label=int(labels[0]),
-                windows=tuple(concept.windows[index] for index in indices),
-            )
-        )
-    return tuple(bags)
-
-
-class ContTrainPlusPlusTrainer:
+class CommandModel(Model):
     """Dedicated complete-bag trainer implementing the ContTrain++ protocol."""
 
     def __init__(
         self,
-        model: PaperCommandVideoModel | None = None,
-        config: PaperCommandTrainerConfig | None = None,
+        model: CommandVideoNetwork | None = None,
+        config: CommandTrainerConfig | None = None,
     ):
-        self.config = config or PaperCommandTrainerConfig()
-        self.model = model or PaperCommandVideoModel(self.config.architecture)
+        self.config = config or CommandTrainerConfig()
+        self.model = model or CommandVideoNetwork(self.config.architecture)
         if self.model.architecture != self.config.architecture:
             raise ValueError("model architecture and trainer configuration must match")
         self.device = torch.device(self.config.device)
@@ -483,6 +267,41 @@ class ContTrainPlusPlusTrainer:
             step_size=self.config.lr_step_size,
             gamma=self.config.lr_gamma,
         )
+
+    def fit(self, data: np.ndarray) -> None:
+        """Learn one complete-bag task, retaining ContTrain++ replay state."""
+        bags = self._bags(data)
+        task_ids = {bag.task_id for bag in bags}
+        if len(task_ids) != 1:
+            raise ValueError("training data must contain exactly one task")
+        self.fit_task(bags, task_id=next(iter(task_ids)))
+
+    def predict(self, data: np.ndarray) -> VideoPredictionResults:
+        """Return bag maxima and aligned temporal scores for frame evaluation."""
+        bags = self._bags(data)
+        result = self.predict_bags(bags)
+        scores = result["anomaly_scores"]
+        maxima = scores.max(axis=1) if bags else np.empty(0)
+        return VideoPredictionResults(
+            y_pred=(maxima >= 0.5).astype(np.int64),
+            anomaly_scores=maxima,
+            window_scores=scores.reshape(-1),
+            classifier_scores=result["classifier_scores"].reshape(-1),
+            windows=tuple(window for bag in bags for window in bag.windows),
+        )
+
+    @staticmethod
+    def _bags(data):
+        values = np.asarray(data, dtype=object)
+        if values.ndim != 1 or any(not isinstance(bag, VideoBag) for bag in values):
+            raise ValueError("COMMAND requires a one-dimensional array of VideoBag objects")
+        return tuple(values)
+
+    def name(self) -> str:
+        return "COMMAND"
+
+    def additional_info(self) -> dict:
+        return self.metadata()
 
     def _optimizer(self):
         secondary = []
@@ -503,7 +322,7 @@ class ContTrainPlusPlusTrainer:
             )
         return torch.optim.Adam(groups)
 
-    def fit_task(self, bags: Sequence[PaperVideoBag], *, task_id: str | None = None) -> Dict[str, object]:
+    def fit_task(self, bags: Sequence[VideoBag], *, task_id: str | None = None) -> Dict[str, object]:
         if not bags:
             raise ValueError("fit_task requires at least one video bag")
         # ``epochs`` is a per-task setting.  StepLR therefore has to restart at
@@ -513,7 +332,7 @@ class ContTrainPlusPlusTrainer:
         if self._global_epoch:
             self._reset_task_scheduler()
         prepared = tuple(
-            PaperVideoBag(
+            VideoBag(
                 bag_id=bag.bag_id,
                 task_id=task_id or bag.task_id,
                 features=bag.features,
@@ -559,11 +378,8 @@ class ContTrainPlusPlusTrainer:
                     device=self.device,
                 )
                 self.optimizer.zero_grad(set_to_none=True)
-                output = self.model(features, track_memory_usage=self.model.mode == "dual-memory")
-                if self.model.mode == "dual-memory":
-                    loss = paper_command_composite_loss(output, labels, self.config.loss)
-                else:
-                    loss = self._normal_only_loss(output)
+                output = self.model(features, track_memory_usage=True)
+                loss = command_composite_loss(output, labels, self.config.loss)
                 loss.total.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.gradient_clip)
                 self.optimizer.step()
@@ -616,29 +432,16 @@ class ContTrainPlusPlusTrainer:
             gamma=self.config.lr_gamma,
         )
 
-    def _normal_only_loss(self, output: PaperNormalOnlyOutput) -> PaperCommandLossBreakdown:
-        scores = output.nearest_distance
-        compactness = scores.mean()
-        smoothness = (scores[:, 1:] - scores[:, :-1]).square().mean() if scores.shape[1] > 1 else scores.sum() * 0
-        score_l2 = scores.square().mean()
-        total = (
-            compactness + self.config.loss.smoothness_weight * smoothness + self.config.loss.score_l2_weight * score_l2
-        )
-        zero = scores.sum() * 0.0
-        return PaperCommandLossBreakdown(total, compactness, zero, zero, zero, zero, smoothness, score_l2)
-
     @staticmethod
-    def _raw_scores(output: PaperCommandOutput | PaperNormalOnlyOutput) -> Tensor:
-        if isinstance(output, PaperNormalOnlyOutput):
-            return output.nearest_distance
+    def _raw_scores(output: CommandOutput) -> Tensor:
         return output.memory.dual_memory_deviation
 
     def _replace_novel_normal_features(
         self,
-        output: PaperCommandOutput | PaperNormalOnlyOutput,
+        output: CommandOutput,
         labels: Tensor,
     ) -> int:
-        if self.model.mode != "dual-memory" or self._global_epoch < self.config.novelty_warmup_epochs:
+        if self._global_epoch < self.config.novelty_warmup_epochs:
             return 0
         normal = labels < 0.5
         if not normal.any():
@@ -668,7 +471,7 @@ class ContTrainPlusPlusTrainer:
         self._calibration_median = median
         self._calibration_scale = max(1e-8, 1.4826 * mad)
 
-    def predict_bags(self, bags: Sequence[PaperVideoBag], *, batch_size: int = 8) -> Dict[str, np.ndarray]:
+    def predict_bags(self, bags: Sequence[VideoBag], *, batch_size: int = 8) -> Dict[str, np.ndarray]:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if not bags:
@@ -677,38 +480,34 @@ class ContTrainPlusPlusTrainer:
                 "raw_scores": np.empty((0, 0), dtype=np.float32),
                 "classifier_scores": np.empty((0, 0), dtype=np.float32),
             }
+        was_training = self.model.training
         self.model.eval()
-        raw_blocks = []
-        classifier_blocks = []
-        with torch.no_grad():
-            for offset in range(0, len(bags), batch_size):
-                batch = bags[offset : offset + batch_size]
-                features = torch.as_tensor(
-                    np.stack([bag.features for bag in batch]),
-                    dtype=torch.float32,
-                    device=self.device,
-                )
-                output = self.model(features)
-                raw_blocks.append(self._raw_scores(output).cpu().numpy())
-                if isinstance(output, PaperCommandOutput):
+        try:
+            raw_blocks = []
+            classifier_blocks = []
+            with torch.no_grad():
+                for offset in range(0, len(bags), batch_size):
+                    batch = bags[offset : offset + batch_size]
+                    features = torch.as_tensor(
+                        np.stack([bag.features for bag in batch]),
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                    output = self.model(features)
+                    raw_blocks.append(self._raw_scores(output).cpu().numpy())
                     classifier_blocks.append(output.probabilities.cpu().numpy())
+        finally:
+            self.model.train(was_training)
         raw = np.concatenate(raw_blocks).astype(np.float32, copy=False)
-        # A logistic map collapses very negative normal-only distances to one
-        # float32 value. The arctangent map is equally monotonic and bounded,
-        # but retains useful rank resolution in those extreme tails.
+        # A bounded monotonic map that preserves rank in extreme score tails.
         z = (raw.astype(np.float64) - self._calibration_median) / self._calibration_scale
         calibrated = 0.5 + np.arctan(z) / np.pi
-        classifier = (
-            np.concatenate(classifier_blocks).astype(np.float32, copy=False)
-            if classifier_blocks
-            else np.full_like(raw, np.nan)
-        )
+        classifier = np.concatenate(classifier_blocks).astype(np.float32, copy=False)
         return {"anomaly_scores": calibrated, "raw_scores": raw, "classifier_scores": classifier}
 
     def state_dict(self) -> Mapping[str, object]:
         return {
             "config": asdict(self.config),
-            "mode": self.model.mode,
             "model": self.model.state_dict(),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
@@ -721,8 +520,6 @@ class ContTrainPlusPlusTrainer:
         }
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
-        if state["mode"] != self.model.mode:
-            raise ValueError("checkpoint mode does not match trainer model")
         if state["config"] != asdict(self.config):
             raise ValueError("checkpoint configuration does not match trainer configuration")
         self.model.load_state_dict(state["model"])
@@ -751,7 +548,6 @@ class ContTrainPlusPlusTrainer:
 
     def metadata(self) -> Dict[str, object]:
         return {
-            "mode": self.model.mode,
             "architecture": asdict(self.config.architecture),
             "training": {
                 key: value for key, value in asdict(self.config).items() if key not in {"architecture", "loss"}

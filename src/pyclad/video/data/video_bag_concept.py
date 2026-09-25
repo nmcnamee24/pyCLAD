@@ -10,7 +10,7 @@ from pyclad.data.concept import Concept
 
 @dataclass
 class VideoBagConcept(Concept):
-    """A concept with one PaperVideoBag per row and optional frame labels.
+    """A concept with one VideoBag per row and optional frame labels.
 
     Keeping a bag in each object-array row lets the standard scenario preserve
     temporal order and replay identity without treating windows as samples.

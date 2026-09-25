@@ -1,32 +1,45 @@
-"""Metadata for model-ready video windows."""
+"""Complete video bags and their temporal annotation coordinates."""
 
-from __future__ import annotations
+from dataclasses import dataclass
+from typing import Tuple
 
-from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional
+import numpy as np
 
 
 @dataclass(frozen=True)
 class VideoWindow:
-    """Sidecar metadata for one row of a video feature matrix."""
+    """Inclusive frame coordinates for one temporal snippet."""
 
     video_id: str
     start_frame: int
     end_frame: int
-    feature_index: int
-    split: str = "test"
-    label: Optional[int] = None
-    anomaly_class: Optional[str] = None
-    payload: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.video_id or self.start_frame < 0 or self.end_frame < self.start_frame:
+            raise ValueError("a window requires a video id and nonnegative ordered frame coordinates")
+
+
+@dataclass(frozen=True)
+class VideoBag:
+    """One complete video bag retained by the paper trainer and replay buffer."""
+
+    bag_id: str
+    task_id: str
+    features: np.ndarray
+    weak_label: int
+    windows: Tuple[VideoWindow, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.video_id:
-            raise ValueError("video_id must be non-empty")
-        if self.start_frame < 0:
-            raise ValueError("start_frame must be non-negative")
-        if self.end_frame < self.start_frame:
-            raise ValueError("end_frame must be greater than or equal to start_frame")
-        if self.feature_index < 0:
-            raise ValueError("feature_index must be non-negative")
-        if self.label not in {None, 0, 1}:
-            raise ValueError("label must be one of: None, 0, 1")
+        features = np.asarray(self.features, dtype=np.float32)
+        if not self.bag_id or not self.task_id:
+            raise ValueError("bag_id and task_id must be non-empty")
+        if features.ndim != 2 or features.shape[1] <= 0:
+            raise ValueError(f"paper COMMAND bags must have shape (time, features), got {features.shape}")
+        if len(features) == 0 or not np.isfinite(features).all():
+            raise ValueError("paper COMMAND bag features must be finite and non-empty")
+        if self.weak_label not in {0, 1}:
+            raise ValueError("weak_label must be zero or one")
+        if self.windows and len(self.windows) != len(features):
+            raise ValueError("windows and bag features must have the same temporal length")
+        object.__setattr__(self, "features", features)
+        object.__setattr__(self, "windows", tuple(self.windows))
