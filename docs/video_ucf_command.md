@@ -74,7 +74,12 @@ training, retaining optimizer state and complete-bag replay across tasks;
 `ContTrainPlusPlusStrategy` connects it to the core scenario. Prediction
 returns bag maxima plus window scores. `VideoFrameMetricCallback` expands
 those scores to frames and reuses the core metric-matrix reporting. Checkpoints
-are saved explicitly through `model.save_checkpoint(path)`.
+are saved explicitly through `model.save_checkpoint(path)`. Load them with
+`model.load_checkpoint(path)` using the same configuration; the destination
+`device` may differ. New checkpoints restore CPU and CUDA random-generator state
+for dropout continuation on the same backend. Loading restores those process-wide
+RNG states; identical results across devices are not guaranteed. Older checkpoints
+remain loadable but cannot restore Torch RNG state that was never saved.
 
 The example composes the public classes directly; no video-specific CLI or
 experiment runner is required. Use `JsonOutputWriter` to serialize the model,

@@ -185,3 +185,110 @@ class TestCommandTraining:
         assert first["learning_rates"]["primary"] == pytest.approx(1e-05)
         assert second["learning_rates"]["primary"] == pytest.approx(1e-05)
         assert second["learning_rates"]["secondary_memory"] == pytest.approx(1e-06)
+
+    @staticmethod
+    def _bags(task, count=8):
+        from pyclad.video.data.sample import VideoBag
+
+        return tuple(
+            VideoBag(str(index) + task, task, np.random.default_rng(index).normal(size=(8, 8)), index % 2)
+            for index in range(count)
+        )
+
+    def test_replay_never_exceeds_total_batch_size(self):
+        from pyclad.video.models.command.command import CommandModel
+        from pyclad.video.models.command.config import CommandTrainerConfig
+
+        model = CommandModel(
+            config=CommandTrainerConfig(architecture=self._architecture(), epochs=2, batch_size=4, replay_batch_size=2)
+        )
+        sizes = []
+        handle = model.model.register_forward_pre_hook(lambda module, args: sizes.append(len(args[0])))
+        try:
+            model.fit_task(self._bags("T1"))
+            model.fit_task(self._bags("T2"))
+        finally:
+            handle.remove()
+        assert sizes and max(sizes) <= 4
+
+    def test_novelty_replacements_preserve_highest_scoring_candidates(self):
+        from dataclasses import replace
+
+        from pyclad.video.models.command.command import CommandModel
+        from pyclad.video.models.command.config import CommandTrainerConfig
+
+        model = CommandModel(
+            config=CommandTrainerConfig(
+                architecture=replace(self._architecture(), memory_size=2), novelty_warmup_epochs=0
+            )
+        )
+        output = model.model(torch.randn(1, 8, 8))
+        features = torch.arange(64, dtype=torch.float32).reshape(1, 8, 8)
+        output = replace(
+            output,
+            temporal_features=features,
+            memory=replace(
+                output.memory, dual_memory_deviation=torch.tensor([[0.0, 0.0, 0.0, 0.0, 0.0, 6.0, 8.0, 10.0]])
+            ),
+        )
+        memory = model.model.network.memory
+        memory.primary_access_count.fill_(2)
+        replaced = model._replace_novel_normal_features(output, torch.zeros(1))
+        assert replaced == 2
+        torch.testing.assert_close(memory.primary_memory, features[0, [7, 6]])
+
+    def test_checkpoint_allows_device_change_but_rejects_training_change(self, tmp_path):
+        from dataclasses import replace
+
+        from pyclad.video.models.command.command import CommandModel
+        from pyclad.video.models.command.config import CommandTrainerConfig
+
+        config = CommandTrainerConfig(architecture=self._architecture(), epochs=1)
+        model = CommandModel(config=config)
+        checkpoint = tmp_path / "model.pt"
+        model.save_checkpoint(checkpoint)
+        state = model.state_dict()
+        state["config"]["device"] = "cuda:0"
+        torch.save(state, checkpoint)
+        restored = CommandModel(config=config)
+        restored.load_checkpoint(checkpoint)
+        np.testing.assert_array_equal(
+            model.predict_bags(self._bags("test"))["raw_scores"],
+            restored.predict_bags(self._bags("test"))["raw_scores"],
+        )
+        incompatible = CommandModel(config=replace(config, learning_rate=0.02))
+        with pytest.raises(ValueError, match="configuration"):
+            incompatible.load_checkpoint(checkpoint)
+
+    @pytest.mark.parametrize(
+        "device",
+        [
+            "cpu",
+            pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")),
+        ],
+    )
+    def test_checkpoint_resumes_training_with_dropout(self, tmp_path, device):
+        from dataclasses import replace
+
+        from pyclad.video.models.command.command import CommandModel
+        from pyclad.video.models.command.config import CommandTrainerConfig
+
+        config = CommandTrainerConfig(
+            architecture=replace(self._architecture(), dropout=0.25),
+            device=device,
+            epochs=1,
+            batch_size=4,
+            replay_batch_size=2,
+            novelty_warmup_epochs=10,
+        )
+        torch.manual_seed(42)
+        model = CommandModel(config=config)
+        model.fit_task(self._bags("T1"))
+        checkpoint = tmp_path / "model.pt"
+        model.save_checkpoint(checkpoint)
+        model.fit_task(self._bags("T2"))
+        restored = CommandModel(config=config)
+        restored.load_checkpoint(checkpoint)
+        restored.fit_task(self._bags("T2"))
+        for name, value in model.model.state_dict().items():
+            torch.testing.assert_close(value, restored.model.state_dict()[name], rtol=0, atol=0)

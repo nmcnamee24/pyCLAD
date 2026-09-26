@@ -286,18 +286,25 @@ class MemDualNet(nn.Module):
         )
 
     @torch.no_grad()
-    def least_accessed_slot(self, bank: Literal["primary", "secondary"]) -> int:
+    def least_accessed_slot(self, bank: Literal["primary", "secondary"], *, exclude_slots: tuple[int, ...] = ()) -> int:
         counts, last_access = self._usage_buffers(bank)
-        minimum_count = counts.min()
-        candidates = torch.nonzero(counts == minimum_count, as_tuple=False).flatten()
+        eligible = torch.ones_like(counts, dtype=torch.bool)
+        eligible[list(exclude_slots)] = False
+        if not eligible.any():
+            raise ValueError("no eligible memory slots remain")
+        minimum_count = counts[eligible].min()
+        candidates = torch.nonzero(eligible & (counts == minimum_count), as_tuple=False).flatten()
         candidate_ages = last_access[candidates]
         return int(candidates[candidate_ages.argmin()].item())
 
     @torch.no_grad()
-    def replace_least_accessed(self, bank: Literal["primary", "secondary"], feature: Tensor) -> int:
+    def replace_least_accessed(
+        self, bank: Literal["primary", "secondary"], feature: Tensor, *, exclude_slots: tuple[int, ...] = ()
+    ) -> int:
+        """Replace an eligible slot, optionally protecting earlier batch insertions."""
         if feature.shape != (self.feature_dim,):
             raise ValueError(f"replacement feature must have shape ({self.feature_dim},), got {tuple(feature.shape)}")
-        slot = self.least_accessed_slot(bank)
+        slot = self.least_accessed_slot(bank, exclude_slots=exclude_slots)
         memory = self.primary_memory if bank == "primary" else self.secondary_memory
         memory[slot].copy_(feature.to(device=memory.device, dtype=memory.dtype))
         counts, last_access = self._usage_buffers(bank)

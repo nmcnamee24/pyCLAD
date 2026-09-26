@@ -357,15 +357,17 @@ class CommandModel(Model):
         self.model.train()
         for _ in range(self.config.epochs):
             permutation = self._rng.permutation(len(prepared))
-            current_batch_size = (
-                self.config.batch_size - self.config.replay_batch_size if len(self.replay) else self.config.batch_size
-            )
-            for offset in range(0, len(prepared), current_batch_size):
+            offset = 0
+            while offset < len(prepared):
+                # Replay can fill during the first epoch, so reserve space per batch.
+                replay_count = min(self.config.replay_batch_size, len(self.replay))
+                current_batch_size = self.config.batch_size - replay_count
                 current = tuple(prepared[index] for index in permutation[offset : offset + current_batch_size])
                 replay = self.replay.sample(
                     self.config.replay_batch_size,
                     exclude_bag_ids=(bag.bag_id for bag in current),
                 )
+                offset += len(current)
                 combined = (*current, *replay)
                 features = torch.as_tensor(
                     np.stack([bag.features for bag in combined]),
@@ -458,9 +460,14 @@ class CommandModel(Model):
         order = torch.argsort(candidate_scores, descending=True, stable=True)
         temporal = output.temporal_features[normal].detach()
         memory = self.model.network.memory
-        for candidate in candidates[order]:
-            memory.replace_least_accessed("primary", temporal[candidate[0], candidate[1]])
-        return int(len(candidates))
+        replaced = []
+        # Preserve the highest-novelty candidates when the batch exceeds capacity.
+        for candidate in candidates[order[: len(memory.primary_memory)]]:
+            slot = memory.replace_least_accessed(
+                "primary", temporal[candidate[0], candidate[1]], exclude_slots=tuple(replaced)
+            )
+            replaced.append(slot)
+        return len(replaced)
 
     def _update_calibration(self) -> None:
         if not self._normal_score_history:
@@ -517,10 +524,14 @@ class CommandModel(Model):
             "calibration_median": self._calibration_median,
             "calibration_scale": self._calibration_scale,
             "rng_state": self._rng.bit_generator.state,
+            "torch_rng_state": torch.random.get_rng_state(),
+            "torch_cuda_rng_state": torch.cuda.get_rng_state(self.device) if self.device.type == "cuda" else None,
         }
 
     def load_state_dict(self, state: Mapping[str, object]) -> None:
-        if state["config"] != asdict(self.config):
+        saved_config = {key: value for key, value in state["config"].items() if key != "device"}
+        current_config = {key: value for key, value in asdict(self.config).items() if key != "device"}
+        if saved_config != current_config:
             raise ValueError("checkpoint configuration does not match trainer configuration")
         self.model.load_state_dict(state["model"])
         self.optimizer.load_state_dict(state["optimizer"])
@@ -531,6 +542,12 @@ class CommandModel(Model):
         self._calibration_median = float(state["calibration_median"])
         self._calibration_scale = float(state["calibration_scale"])
         self._rng.bit_generator.state = state["rng_state"]
+        # Older checkpoints remain loadable, but lack exact dropout continuation.
+        if "torch_rng_state" in state:
+            torch.random.set_rng_state(state["torch_rng_state"].cpu())
+        cuda_state = state.get("torch_cuda_rng_state")
+        if cuda_state is not None and self.device.type == "cuda":
+            torch.cuda.set_rng_state(cuda_state.cpu(), self.device)
 
     def save_checkpoint(self, path: str | Path) -> None:
         destination = Path(path).expanduser().resolve()
@@ -543,7 +560,9 @@ class CommandModel(Model):
             temporary.unlink(missing_ok=True)
 
     def load_checkpoint(self, path: str | Path) -> None:
-        state = torch.load(Path(path).expanduser().resolve(), map_location=self.device, weights_only=False)
+        # Load RNG byte tensors on CPU; model/optimizer loading moves parameters
+        # and optimizer state to the configured destination device.
+        state = torch.load(Path(path).expanduser().resolve(), map_location="cpu", weights_only=False)
         self.load_state_dict(state)
 
     def metadata(self) -> Dict[str, object]:
