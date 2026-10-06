@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
+from huggingface_hub import snapshot_download
 
-from pyclad.data.dataset import Dataset
 from pyclad.data.datasets.concepts_dataset import ConceptsDataset
 from pyclad.video.data.sample import VideoBag, VideoWindow
 from pyclad.video.data.video_bag_concept import VideoBagConcept
@@ -51,10 +51,40 @@ class CommandUcfCrimeRecord:
         return self.relative_path
 
 
-class CommandUcfCrimeDataset(Dataset):
-    """Read the 4/4/5 stream, retaining repeated manifest rows as distinct bags."""
+class CommandUcfCrimeDataset(ConceptsDataset):
+    """Download/cache paired RGB/flow features or read a local COMMAND archive.
 
-    def __init__(self, root):
+    The 4/4/5 stream retains repeated manifest rows as distinct training bags.
+    """
+
+    _hf_repo = "nmcnamee24/ucf-crime-rgb-flow-features"
+
+    def __init__(self, root=None, *, cache_dir=None, revision=None, local_files_only=False, max_videos_per_class=None):
+        """
+        :param root: Existing archive directory. If omitted, download from Hugging Face.
+            An explicit local path never triggers a download.
+        :param cache_dir: Hugging Face cache directory; None uses its default cache.
+        :param revision: Optional Hub commit, tag, or branch; None uses the latest main.
+        :param local_files_only: Use only a previously downloaded Hub snapshot.
+        :param max_videos_per_class: Optional positive training limit per class and label;
+            the complete test split is retained.
+        """
+        if root is None:
+            root = snapshot_download(
+                repo_id=self._hf_repo,
+                repo_type="dataset",
+                cache_dir=cache_dir,
+                revision=revision,
+                local_files_only=local_files_only,
+                allow_patterns=[
+                    "all_rgbs/**/*.npy",
+                    "all_flows/**/*.npy",
+                    "train_normal.txt",
+                    "train_anomaly.txt",
+                    "test_normalv2.txt",
+                    "test_anomalyv2.txt",
+                ],
+            )
         self.root = Path(root).expanduser().resolve()
         self._validate_layout()
         self._normal_train = self._read_train_records("train_normal.txt", weak_label=0)
@@ -76,11 +106,18 @@ class CommandUcfCrimeDataset(Dataset):
         self._record_ids = {
             id(r): f"train:{i}:{r.video_id}" for i, r in enumerate((*self._normal_train, *self._anomaly_train))
         }
-
-    def name(self):
-        return "COMMAND-UCF-Crime"
+        dataset = self._read_dataset(max_videos_per_class=max_videos_per_class)
+        super().__init__(
+            name=dataset.name(), train_concepts=dataset.train_concepts(), test_concepts=dataset.test_concepts()
+        )
 
     def read_dataset(self, *, max_videos_per_class=None) -> ConceptsDataset:
+        """Compatibility wrapper; the constructor already exposes the concepts."""
+        if max_videos_per_class is None:
+            return self
+        return self._read_dataset(max_videos_per_class=max_videos_per_class)
+
+    def _read_dataset(self, *, max_videos_per_class=None) -> ConceptsDataset:
         """Materialize T1/T2/T3 with disjoint normal shards and a fixed test split.
 
         An optional positive per-class limit supports small smoke runs. It is
@@ -104,7 +141,7 @@ class CommandUcfCrimeDataset(Dataset):
         if not self._test_records:
             raise ValueError("test manifest is empty")
         test = self._concept("test", self._test_records, training=False)
-        return ConceptsDataset(self.name(), train, [test])
+        return ConceptsDataset("COMMAND-UCF-Crime", train, [test])
 
     def _concept(self, name, records, *, training):
         bags = []
@@ -210,8 +247,10 @@ class CommandUcfCrimeDataset(Dataset):
                 boundaries = tuple(int(value) for value in ast.literal_eval(fields[2]))
                 if len(boundaries) % 2:
                     raise ValueError(f"anomaly boundaries must contain start/stop pairs: {raw_line!r}")
+                if any(start < 1 or stop < start for start, stop in zip(boundaries[::2], boundaries[1::2])):
+                    raise ValueError(f"anomaly intervals must use positive, ordered frame coordinates: {raw_line!r}")
                 intervals = tuple(
-                    (max(0, boundaries[index] - 1), boundaries[index + 1]) for index in range(0, len(boundaries), 2)
+                    (boundaries[index] - 1, boundaries[index + 1]) for index in range(0, len(boundaries), 2)
                 )
                 anomaly_class = fields[0].split("/", 1)[0]
                 records.append(

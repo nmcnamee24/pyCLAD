@@ -168,7 +168,7 @@ def command_composite_loss(
     """Compute COMMAND's MIL, contrastive, focal, and separation objective."""
 
     config = config or CommandLossConfig()
-    labels = weak_labels.to(dtype=output.logits.dtype).reshape(-1)
+    labels = weak_labels.to(device=output.logits.device, dtype=output.logits.dtype).reshape(-1)
     if output.logits.ndim != 2 or len(labels) != output.logits.shape[0]:
         raise ValueError("weak_labels must provide one value per video bag")
     if not torch.all((labels == 0) | (labels == 1)):
@@ -200,10 +200,10 @@ def command_composite_loss(
         else zero
     )
 
-    probabilities = output.probabilities.amax(dim=1).clamp(1e-7, 1.0 - 1e-7)
-    positive_probability = torch.where(labels > 0.5, probabilities, 1.0 - probabilities)
+    cross_entropy = F.binary_cross_entropy_with_logits(output.logits.amax(dim=1), labels, reduction="none")
+    positive_probability = torch.exp(-cross_entropy)
     alpha = torch.where(labels > 0.5, config.focal_alpha, 1.0 - config.focal_alpha)
-    focal = (-alpha * (1.0 - positive_probability).pow(config.focal_gamma) * positive_probability.log()).mean()
+    focal = (alpha * (1.0 - positive_probability).pow(config.focal_gamma) * cross_entropy).mean()
     score_l2 = scores.square().mean()
 
     total = (
@@ -234,9 +234,7 @@ def _supervised_info_nce(projections: Tensor, labels: Tensor, temperature: float
     valid = positive_mask.any(dim=1)
     if not valid.any():
         return projections.sum() * 0.0
-    logits = logits - logits.max(dim=1, keepdim=True).values.detach()
-    exp_logits = torch.exp(logits) * (~identity)
-    log_prob = logits - torch.log(exp_logits.sum(dim=1, keepdim=True).clamp_min(1e-12))
+    log_prob = logits - torch.logsumexp(logits.masked_fill(identity, -torch.inf), dim=1, keepdim=True)
     mean_positive_log_prob = (positive_mask * log_prob).sum(dim=1) / positive_mask.sum(dim=1).clamp_min(1)
     return -mean_positive_log_prob[valid].mean()
 
@@ -250,6 +248,7 @@ class CommandModel(Model):
         config: CommandTrainerConfig | None = None,
     ):
         self.config = config or CommandTrainerConfig()
+        torch.manual_seed(self.config.seed)
         self.model = model or CommandVideoNetwork(self.config.architecture)
         if self.model.architecture != self.config.architecture:
             raise ValueError("model architecture and trainer configuration must match")
@@ -300,9 +299,6 @@ class CommandModel(Model):
     def name(self) -> str:
         return "COMMAND"
 
-    def additional_info(self) -> dict:
-        return self.metadata()
-
     def _optimizer(self):
         secondary = []
         primary = []
@@ -325,12 +321,6 @@ class CommandModel(Model):
     def fit_task(self, bags: Sequence[VideoBag], *, task_id: str | None = None) -> Dict[str, object]:
         if not bags:
             raise ValueError("fit_task requires at least one video bag")
-        # ``epochs`` is a per-task setting.  StepLR therefore has to restart at
-        # each task boundary; otherwise a 100-epoch first task leaves later
-        # tasks at 1e-24 or lower and they cannot adapt at all.  Adam moments
-        # and model/replay state remain continual.
-        if self._global_epoch:
-            self._reset_task_scheduler()
         prepared = tuple(
             VideoBag(
                 bag_id=bag.bag_id,
@@ -344,11 +334,18 @@ class CommandModel(Model):
         temporal_lengths = {len(bag.features) for bag in prepared}
         if len(temporal_lengths) != 1:
             raise ValueError("all video bags in a task must have the same temporal length")
+        if self.config.replay_batch_size and any(
+            len(entry.bag.features) not in temporal_lengths for entry in self.replay.entries
+        ):
+            raise ValueError("task bags and replay bags must have the same temporal length")
         feature_dims = {bag.features.shape[1] for bag in prepared}
         if feature_dims != {self.config.architecture.fused_dim}:
             raise ValueError(
                 f"task bags must have feature dimension {self.config.architecture.fused_dim}, got {sorted(feature_dims)}"
             )
+        # Restart the per-task schedule while retaining Adam moments and replay.
+        if self._global_epoch:
+            self._reset_task_scheduler()
         started = time.perf_counter()
         totals: Dict[str, float] = {}
         batches = 0
@@ -387,7 +384,7 @@ class CommandModel(Model):
                 self.optimizer.step()
                 novelty_replacements += self._replace_novel_normal_features(output, labels)
 
-                curves = self._raw_scores(output).detach().cpu().numpy().astype(np.float32)
+                curves = output.memory.dual_memory_deviation.detach().cpu().numpy().astype(np.float32)
                 batch_entries = []
                 for index, bag in enumerate(current):
                     latest_scores[bag.bag_id] = curves[index]
@@ -433,10 +430,6 @@ class CommandModel(Model):
             step_size=self.config.lr_step_size,
             gamma=self.config.lr_gamma,
         )
-
-    @staticmethod
-    def _raw_scores(output: CommandOutput) -> Tensor:
-        return output.memory.dual_memory_deviation
 
     def _replace_novel_normal_features(
         self,
@@ -501,7 +494,7 @@ class CommandModel(Model):
                         device=self.device,
                     )
                     output = self.model(features)
-                    raw_blocks.append(self._raw_scores(output).cpu().numpy())
+                    raw_blocks.append(output.memory.dual_memory_deviation.cpu().numpy())
                     classifier_blocks.append(output.probabilities.cpu().numpy())
         finally:
             self.model.train(was_training)
@@ -565,7 +558,7 @@ class CommandModel(Model):
         state = torch.load(Path(path).expanduser().resolve(), map_location="cpu", weights_only=False)
         self.load_state_dict(state)
 
-    def metadata(self) -> Dict[str, object]:
+    def additional_info(self) -> Dict[str, object]:
         return {
             "architecture": asdict(self.config.architecture),
             "training": {

@@ -45,6 +45,54 @@ class TestCommandTraining:
         assert float(normal_only.contrastive.detach()) == 0.0
         assert float(normal_only.anomaly_separation.detach()) == 0.0
 
+    def test_contrastive_loss_remains_stable_at_small_temperature(self):
+        from dataclasses import replace
+
+        from pyclad.video.models.command.architecture import CommandNetwork
+        from pyclad.video.models.command.command import command_composite_loss
+        from pyclad.video.models.command.config import CommandLossConfig
+
+        output = CommandNetwork(self._architecture())(torch.randn(4, 8, 4), torch.randn(4, 8, 4))
+        projections = torch.tensor([[1.0, 0.0], [0.8, 0.6], [-1.0, 0.0], [-0.8, -0.6]])
+        projections.requires_grad_()
+        output = replace(output, projections=projections[:, None, :].expand(-1, 8, -1))
+        loss = command_composite_loss(
+            output, torch.tensor([0.0, 0.0, 1.0, 1.0]), CommandLossConfig(contrastive_temperature=1e-4)
+        )
+        assert loss.contrastive.item() == pytest.approx(0.0, abs=1e-6)
+        loss.contrastive.backward()
+        assert torch.isfinite(projections.grad).all()
+
+    def test_focal_loss_trains_confidently_wrong_predictions(self):
+        from dataclasses import replace
+
+        from pyclad.video.models.command.architecture import CommandNetwork
+        from pyclad.video.models.command.command import command_composite_loss
+
+        output = CommandNetwork(self._architecture())(torch.randn(2, 8, 4), torch.randn(2, 8, 4))
+        logits = torch.tensor([[100.0] * 8, [-100.0] * 8], requires_grad=True)
+        output = replace(output, logits=logits, probabilities=torch.sigmoid(logits))
+        loss = command_composite_loss(output, torch.tensor([0.0, 1.0]))
+        loss.focal.backward()
+        assert torch.isfinite(loss.focal)
+        assert logits.grad[0].sum() > 0
+        assert logits.grad[1].sum() < 0
+
+    def test_seed_controls_network_initialization_and_training(self):
+        from pyclad.video.models.command.command import CommandModel
+        from pyclad.video.models.command.config import CommandTrainerConfig
+
+        config = CommandTrainerConfig(
+            architecture=self._architecture(), epochs=1, batch_size=4, replay_batch_size=2, seed=17
+        )
+        first = CommandModel(config=config)
+        first.fit_task(self._bags("T1"))
+        torch.manual_seed(1234)
+        second = CommandModel(config=config)
+        second.fit_task(self._bags("T1"))
+        for name, value in first.model.state_dict().items():
+            torch.testing.assert_close(value, second.model.state_dict()[name], rtol=0, atol=0)
+
     def test_replay_selection_balances_labels_tasks_and_keeps_complete_bags(self):
         from pyclad.video.data.sample import VideoBag
         from pyclad.video.models.command.command import (
@@ -116,7 +164,9 @@ class TestCommandTraining:
         np.testing.assert_array_equal(before, after)
         assert len(restored.replay) == 4
 
-    def test_calibration_is_bounded_monotonic_and_retains_extreme_tail_rank(self, monkeypatch):
+    def test_calibration_is_bounded_monotonic_and_retains_extreme_tail_rank(self):
+        from dataclasses import replace
+
         from pyclad.video.data.sample import VideoBag
         from pyclad.video.models.command.architecture import CommandVideoNetwork
         from pyclad.video.models.command.command import CommandModel
@@ -141,8 +191,13 @@ class TestCommandTraining:
         trainer._calibration_scale = 0.01
         # Isolate calibration from random network outputs, which may be identical.
         raw = torch.arange(16, dtype=torch.float32).reshape(2, 8) - 1000.0
-        monkeypatch.setattr(trainer, "_raw_scores", lambda output: raw)
-        scores = trainer.predict_bags(bags)["anomaly_scores"]
+        handle = trainer.model.register_forward_hook(
+            lambda module, args, output: replace(output, memory=replace(output.memory, dual_memory_deviation=raw))
+        )
+        try:
+            scores = trainer.predict_bags(bags)["anomaly_scores"]
+        finally:
+            handle.remove()
         assert np.all(scores >= 0.0) and np.all(scores <= 1.0)
         assert np.all(np.diff(scores.reshape(-1)) > 0)
 
@@ -210,6 +265,26 @@ class TestCommandTraining:
         finally:
             handle.remove()
         assert sizes and max(sizes) <= 4
+
+    def test_incompatible_replay_length_is_rejected_before_resetting_scheduler(self):
+        from dataclasses import replace
+
+        from pyclad.video.models.command.command import CommandModel
+        from pyclad.video.models.command.config import CommandTrainerConfig
+
+        model = CommandModel(
+            config=CommandTrainerConfig(
+                architecture=self._architecture(), epochs=1, batch_size=4, replay_batch_size=2, lr_step_size=1
+            )
+        )
+        model.fit_task(self._bags("T1"))
+        scheduler = model.scheduler.state_dict()
+        learning_rates = [group["lr"] for group in model.optimizer.param_groups]
+        shorter_bags = tuple(replace(bag, features=bag.features[:4]) for bag in self._bags("T2"))
+        with pytest.raises(ValueError, match="task bags and replay bags.*temporal length"):
+            model.fit_task(shorter_bags)
+        assert model.scheduler.state_dict() == scheduler
+        assert [group["lr"] for group in model.optimizer.param_groups] == learning_rates
 
     def test_novelty_replacements_preserve_highest_scoring_candidates(self):
         from dataclasses import replace

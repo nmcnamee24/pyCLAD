@@ -15,7 +15,7 @@ def window_scores_to_frame_scores(
     frame_counts: Mapping[str, int],
     aggregation: str = "mean",
 ) -> Dict[str, np.ndarray]:
-    """Aggregate temporal-window scores onto their covered frames."""
+    """Aggregate temporal-window scores, requiring coverage of every labeled frame."""
 
     if aggregation not in {"mean", "max"}:
         raise ValueError("aggregation must be one of: 'mean', 'max'")
@@ -51,9 +51,10 @@ def window_scores_to_frame_scores(
 
     for video_id, values in scores.items():
         covered = counts[video_id] > 0
+        if not covered.all():
+            raise ValueError(f"window scores do not cover all frames for video_id={video_id!r}")
         if aggregation == "mean":
             values[covered] /= counts[video_id][covered]
-        values[~covered] = 0.0
     return scores
 
 

@@ -37,12 +37,17 @@ def archive(tmp_path):
 
 
 def test_three_tasks_use_core_model_scenario_metrics_and_writer(archive):
+    from pyclad.callbacks.evaluation.concept_metric_evaluation import (
+        ConceptMetricCallback,
+    )
+    from pyclad.metrics.base.roc_auc import RocAuc
     from pyclad.models.model import Model
     from pyclad.output.json_writer import JsonOutputWriter
     from pyclad.scenarios.concept_incremental import ConceptIncrementalScenario
     from pyclad.video.callbacks.video_frame_metric_callback import (
         VideoFrameMetricCallback,
     )
+    from pyclad.video.metrics.frame_average_precision import FrameAveragePrecision
     from pyclad.video.metrics.frame_roc_auc import FrameRocAuc
     from pyclad.video.strategies.cont_train import ContTrainPlusPlusStrategy
 
@@ -55,19 +60,26 @@ def test_three_tasks_use_core_model_scenario_metrics_and_writer(archive):
     )
     model = CommandModel(config=config)
     assert isinstance(model, Model)
-    dataset = CommandUcfCrimeDataset(archive).read_dataset()
+    dataset = CommandUcfCrimeDataset(archive)
     assert [c.name for c in dataset.train_concepts()] == ["T1", "T2", "T3"]
     assert [len(c.data) for c in dataset.train_concepts()] == [8, 8, 10]
     strategy = ContTrainPlusPlusStrategy(model)
-    callback = VideoFrameMetricCallback(FrameRocAuc())
-    ConceptIncrementalScenario(dataset, strategy, [callback]).run()
+    callbacks = [
+        VideoFrameMetricCallback(FrameRocAuc()),
+        VideoFrameMetricCallback(FrameAveragePrecision()),
+        ConceptMetricCallback(RocAuc(), []),
+    ]
+    ConceptIncrementalScenario(dataset, strategy, callbacks).run()
     assert len(model.replay) == 6
-    info = callback.info()["concept_metric_callback_Frame-ROC-AUC"]
-    assert list(info["metric_matrix"]) == ["T1", "T2", "T3"]
-    assert all(0 <= row["test"] <= 1 for row in info["metric_matrix"].values())
+    for callback in callbacks:
+        info = next(iter(callback.info().values()))
+        assert list(info["metric_matrix"]) == ["T1", "T2", "T3"]
+        assert all(0 <= row["test"] <= 1 for row in info["metric_matrix"].values())
     output = archive / "result.json"
-    JsonOutputWriter(output).write([dataset, model, strategy, callback])
-    assert json.loads(output.read_text())["model"]["name"] == "COMMAND"
+    JsonOutputWriter(output).write([dataset, model, strategy, *callbacks])
+    saved = json.loads(output.read_text())
+    assert saved["model"]["name"] == "COMMAND"
+    assert saved["concept_metric_callback_Frame-AP"]["test_order"] == ["test"]
     model.save_checkpoint(archive / "model.pt")
     restored = CommandModel(config=config)
     restored.load_checkpoint(archive / "model.pt")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 
 class TestVideoCore:
@@ -26,3 +27,17 @@ class TestVideoCore:
         for metric in (FrameRocAuc(), FrameAveragePrecision()):
             assert metric.compute(scores, None, labels) == 1.0
             assert np.isnan(metric.compute(scores, None, np.zeros(4)))
+
+    @pytest.mark.parametrize("aggregation", ["mean", "max"])
+    @pytest.mark.parametrize("missing", ["frame", "video"])
+    def test_frame_metrics_reject_incomplete_prediction_coverage(self, aggregation, missing):
+        from pyclad.video.data.sample import VideoWindow
+        from pyclad.video.metrics.frame_score_utils import window_scores_to_frame_scores
+
+        windows = (VideoWindow("video", 0, 1), VideoWindow("video", 3, 4))
+        frame_counts = {"video": 5}
+        if missing == "video":
+            windows = (VideoWindow("video", 0, 2), VideoWindow("video", 3, 4))
+            frame_counts["unpredicted"] = 5
+        with pytest.raises(ValueError, match="do not cover all frames"):
+            window_scores_to_frame_scores(windows, [0.2, 0.8], frame_counts, aggregation=aggregation)

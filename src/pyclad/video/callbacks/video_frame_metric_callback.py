@@ -10,7 +10,7 @@ from pyclad.video.metrics.frame_score_utils import (
 
 
 class VideoFrameMetricCallback(ConceptMetricCallback):
-    """Evaluate any BaseMetric on frames, reusing core matrix reporting."""
+    """Evaluate frame ranking metrics, reusing core matrix reporting."""
 
     def __init__(self, base_metric, summarized_metrics=()):
         super().__init__(base_metric, summarized_metrics)
