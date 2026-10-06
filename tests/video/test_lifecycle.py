@@ -91,6 +91,54 @@ def test_three_tasks_use_core_model_scenario_metrics_and_writer(archive):
         np.testing.assert_array_equal(prediction.window_scores, restored.predict(test_data).window_scores)
 
 
+def test_example_runs_core_callbacks_and_writes_summaries_and_checkpoint(archive, monkeypatch):
+    """Execute the example with real training and output, substituting only the data source and run size."""
+    import runpy
+    import sys
+    from dataclasses import replace
+    from pathlib import Path
+
+    from pyclad.video.data import command_ucf_crime
+    from pyclad.video.models.command import config
+
+    trainer_config = config.CommandTrainerConfig
+
+    def small_config(**kwargs):
+        return replace(
+            trainer_config(**kwargs),
+            architecture=CommandArchitectureConfig(
+                hidden_dim=8, state_dim=3, mamba_blocks=1, memory_size=5, projection_dim=6, dropout=0.0
+            ),
+            epochs=1,
+            batch_size=4,
+            replay_batch_size=2,
+            buffer_size=6,
+            device="cpu",
+        )
+
+    example = Path(__file__).resolve().parents[2] / "examples/models/video/command_example.py"
+    monkeypatch.setattr(command_ucf_crime, "snapshot_download", lambda **kwargs: str(archive))
+    monkeypatch.setattr(config, "CommandTrainerConfig", small_config)
+    monkeypatch.setattr(sys, "argv", [str(example)])
+    monkeypatch.chdir(archive)
+    runpy.run_path(str(example), run_name="__main__")
+
+    saved = json.loads((archive / "command-results.json").read_text())
+    for metric in ("ROC-AUC", "AP", "Frame-ROC-AUC", "Frame-AP"):
+        payload = saved[f"concept_metric_callback_{metric}"]
+        assert payload["concepts_order"] == ["T1", "T2", "T3"]
+        assert payload["test_order"] == ["test"]
+        final = payload["metric_matrix"]["T3"]["test"]
+        assert 0 <= final <= 1
+        assert payload["metrics"]["FinalStepAverage"] == final
+    timing = saved["time_evaluation_callback"]
+    assert timing["train_time_total"] > 0 and timing["eval_time_total"] > 0
+    assert all(timing["time_by_concept"][task]["train_time"] > 0 for task in ("T1", "T2", "T3"))
+    state = torch.load(archive / "command-results.pt", map_location="cpu", weights_only=False)
+    assert state["global_epoch"] == 3
+    assert len(state["replay"]["entries"]) == 6
+
+
 def test_duplicate_training_rows_keep_distinct_bags(archive):
     path = archive / "train_normal.txt"
     lines = path.read_text().splitlines()
