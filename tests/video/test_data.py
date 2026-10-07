@@ -1,10 +1,36 @@
 """Archive annotation and task-allocation regressions."""
 
+from zipfile import ZipFile
+
 import numpy as np
 import pytest
 
 from pyclad.video.data.command_ucf_crime import CommandUcfCrimeDataset
 from pyclad.video.metrics.frame_score_utils import window_scores_to_frame_scores
+
+
+def write_feature_zip(root, destination):
+    """Pack the paired test features and original split lists into one Hub artifact."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    files = [p for stream in ("all_rgbs", "all_flows") for p in (root / stream).rglob("*.npy")]
+    files += [
+        root / name for name in ("train_normal.txt", "train_anomaly.txt", "test_normalv2.txt", "test_anomalyv2.txt")
+    ]
+    with ZipFile(destination, "w") as zipped:
+        for path in files:
+            zipped.write(path, path.relative_to(root).as_posix())
+    return destination
+
+
+@pytest.fixture(autouse=True)
+def reject_per_feature_download(monkeypatch):
+    """Unit tests must never fetch the individual remote feature files."""
+    from pyclad.video.data import command_ucf_crime
+
+    def unexpected_snapshot(**kwargs):
+        pytest.fail("the loader must download a single archive rather than a per-feature snapshot")
+
+    monkeypatch.setattr(command_ucf_crime, "snapshot_download", unexpected_snapshot, raising=False)
 
 
 @pytest.fixture
@@ -71,27 +97,23 @@ def test_invalid_annotations_cannot_silently_change_frame_labels(archive, bounda
 @pytest.mark.parametrize("custom_cache", [False, True])
 def test_hub_download_loads_paired_features_and_original_tasks(archive, monkeypatch, custom_cache):
     """The downloaded snapshot must feed the same RGB-first bag reader as local data."""
-    from fnmatch import fnmatch
-
     from pyclad.video.data import command_ucf_crime
 
     for stream, value in (("all_rgbs", 1.0), ("all_flows", 2.0)):
         np.save(archive / stream / "Abuse/train0.mp4.npy", np.full((32, 1024), value, dtype=np.float32))
     options = dict(cache_dir=archive / "cache", revision="test-revision", local_files_only=True) if custom_cache else {}
+    feature_zip = write_feature_zip(archive, archive / "hub-snapshot" / "ucf-crime-rgb-flow.zip")
 
-    def download(*, repo_id, repo_type, cache_dir, revision, local_files_only, allow_patterns):
+    def download(*, repo_id, filename, repo_type, cache_dir, revision, local_files_only):
         assert repo_id == "nmcnamee24/ucf-crime-rgb-flow-features"
         assert repo_type == "dataset"
         assert cache_dir == options.get("cache_dir")
         assert revision == options.get("revision")
         assert local_files_only == options.get("local_files_only", False)
-        for path in archive.rglob("*"):
-            if path.is_file():
-                assert any(fnmatch(path.relative_to(archive).as_posix(), pattern) for pattern in allow_patterns)
-        assert not any(fnmatch("unrelated.zip", pattern) for pattern in allow_patterns)
-        return str(archive)
+        assert filename == "ucf-crime-rgb-flow.zip"
+        return str(feature_zip)
 
-    monkeypatch.setattr(command_ucf_crime, "snapshot_download", download, raising=False)
+    monkeypatch.setattr(command_ucf_crime, "hf_hub_download", download, raising=False)
     dataset = CommandUcfCrimeDataset(**options)
     assert [c.name for c in dataset.train_concepts()] == ["T1", "T2", "T3"]
     assert [len(c.data) for c in dataset.train_concepts()] == [4, 4, 4]
@@ -100,6 +122,75 @@ def test_hub_download_loads_paired_features_and_original_tasks(archive, monkeypa
     assert bag.features.shape == (32, 2048)
     np.testing.assert_array_equal(bag.features[:, :1024], 1.0)
     np.testing.assert_array_equal(bag.features[:, 1024:], 2.0)
+    assert dataset.root != archive
+
+
+def test_extracted_features_are_reused_without_extracting_again(archive, monkeypatch):
+    from pyclad.video.data import command_ucf_crime
+
+    feature_zip = write_feature_zip(archive, archive / "snapshot" / "ucf-crime-rgb-flow.zip")
+    monkeypatch.setattr(command_ucf_crime, "hf_hub_download", lambda **kwargs: str(feature_zip), raising=False)
+    first = CommandUcfCrimeDataset()
+    # The extracted cache should remain usable without reopening the ZIP.
+    feature_zip.write_bytes(b"not a ZIP")
+    cached = CommandUcfCrimeDataset(local_files_only=True)
+    assert cached.root == first.root
+    np.testing.assert_array_equal(
+        cached.train_concepts()[0].data[0].features, first.train_concepts()[0].data[0].features
+    )
+
+
+def test_archive_revisions_use_separate_extracted_caches(archive, monkeypatch):
+    from pyclad.video.data import command_ucf_crime
+
+    first_zip = write_feature_zip(archive, archive / "snapshots/v1/ucf-crime-rgb-flow.zip")
+    np.save(archive / "all_rgbs/Abuse/train0.mp4.npy", np.ones((32, 1024), dtype=np.float32))
+    second_zip = write_feature_zip(archive, archive / "snapshots/v2/ucf-crime-rgb-flow.zip")
+    monkeypatch.setattr(
+        command_ucf_crime,
+        "hf_hub_download",
+        lambda **kwargs: str(first_zip if kwargs["revision"] == "v1" else second_zip),
+        raising=False,
+    )
+    first = CommandUcfCrimeDataset(revision="v1")
+    second = CommandUcfCrimeDataset(revision="v2")
+    assert first.root != second.root
+    np.testing.assert_array_equal(first.train_concepts()[0].data[0].features[:, :1024], 0.0)
+    np.testing.assert_array_equal(second.train_concepts()[0].data[0].features[:, :1024], 1.0)
+
+
+def test_simultaneous_loaders_share_one_complete_extraction(archive, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from pyclad.video.data import command_ucf_crime
+
+    feature_zip = write_feature_zip(archive, archive / "snapshot/ucf-crime-rgb-flow.zip")
+    monkeypatch.setattr(command_ucf_crime, "hf_hub_download", lambda **kwargs: str(feature_zip))
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first, second = list(executor.map(lambda _: CommandUcfCrimeDataset(), range(2)))
+    assert first.root == second.root
+    assert len(list(first.root.rglob("*.npy"))) == 28
+    np.testing.assert_array_equal(
+        first.train_concepts()[0].data[0].features, second.train_concepts()[0].data[0].features
+    )
+
+
+@pytest.mark.parametrize("fault", ["unsafe_path", "incomplete_layout"])
+def test_invalid_archive_is_not_published_as_a_complete_cache(archive, monkeypatch, fault):
+    from pyclad.video.data import command_ucf_crime
+
+    feature_zip = archive / "snapshot/ucf-crime-rgb-flow.zip"
+    feature_zip.parent.mkdir()
+    with ZipFile(feature_zip, "w") as zipped:
+        zipped.writestr("../escaped.txt" if fault == "unsafe_path" else "train_normal.txt", "invalid")
+    monkeypatch.setattr(command_ucf_crime, "hf_hub_download", lambda **kwargs: str(feature_zip), raising=False)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        CommandUcfCrimeDataset()
+    assert not feature_zip.with_suffix("").exists()
+    assert not (feature_zip.parent / "escaped.txt").exists()
+    write_feature_zip(archive, feature_zip)
+    dataset = CommandUcfCrimeDataset()
+    assert [len(c.data) for c in dataset.train_concepts()] == [4, 4, 4]
 
 
 def test_constructor_returns_ready_concepts_like_core_loaders(archive):
@@ -126,7 +217,7 @@ def test_explicit_local_root_never_downloads(archive, monkeypatch):
     def unexpected_download(**kwargs):
         pytest.fail("an explicit local root must not contact Hugging Face")
 
-    monkeypatch.setattr(command_ucf_crime, "snapshot_download", unexpected_download, raising=False)
+    monkeypatch.setattr(command_ucf_crime, "hf_hub_download", unexpected_download, raising=False)
     dataset = CommandUcfCrimeDataset(archive, cache_dir=archive / "unused").read_dataset()
     assert [len(c.data) for c in dataset.train_concepts()] == [4, 4, 4]
     with pytest.raises(FileNotFoundError, match="layout is incomplete"):
@@ -140,7 +231,7 @@ def test_hub_download_failure_preserves_actionable_error(monkeypatch):
     def failed_download(**kwargs):
         raise ConnectionError("Cannot reach Hugging Face; retry or use a cached snapshot")
 
-    monkeypatch.setattr(command_ucf_crime, "snapshot_download", failed_download, raising=False)
+    monkeypatch.setattr(command_ucf_crime, "hf_hub_download", failed_download, raising=False)
     with pytest.raises(ConnectionError, match="Cannot reach Hugging Face"):
         CommandUcfCrimeDataset()
 
@@ -148,7 +239,7 @@ def test_hub_download_failure_preserves_actionable_error(monkeypatch):
 @pytest.mark.longrun
 def test_downloaded_release_and_offline_cache_have_all_three_tasks(tmp_path):
     """Exercise the published paired release through the public dataset loader."""
-    options = dict(cache_dir=tmp_path, revision="5b33de08561dc49378678ab5c696198b593aaa6c")
+    options = dict(cache_dir=tmp_path, revision="96d72a51d0f62b0b08f9d15d4280ced1517dbe1a")
     reader = CommandUcfCrimeDataset(**options)
     dataset = reader.read_dataset()
     assert [c.name for c in dataset.train_concepts()] == ["T1", "T2", "T3"]

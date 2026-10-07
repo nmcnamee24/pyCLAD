@@ -100,6 +100,7 @@ def test_example_runs_core_callbacks_and_writes_summaries_and_checkpoint(archive
 
     from pyclad.video.data import command_ucf_crime
     from pyclad.video.models.command import config
+    from tests.video.test_data import write_feature_zip
 
     trainer_config = config.CommandTrainerConfig
 
@@ -117,7 +118,8 @@ def test_example_runs_core_callbacks_and_writes_summaries_and_checkpoint(archive
         )
 
     example = Path(__file__).resolve().parents[2] / "examples/models/video/command_example.py"
-    monkeypatch.setattr(command_ucf_crime, "snapshot_download", lambda **kwargs: str(archive))
+    feature_zip = write_feature_zip(archive, archive / "snapshot/ucf-crime-rgb-flow.zip")
+    monkeypatch.setattr(command_ucf_crime, "hf_hub_download", lambda **kwargs: str(feature_zip))
     monkeypatch.setattr(config, "CommandTrainerConfig", small_config)
     monkeypatch.setattr(sys, "argv", [str(example)])
     monkeypatch.chdir(archive)

@@ -3,10 +3,13 @@
 import ast
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Optional, Tuple
+from zipfile import ZipFile
 
 import numpy as np
-from huggingface_hub import snapshot_download
+from filelock import FileLock
+from huggingface_hub import hf_hub_download
 
 from pyclad.data.datasets.concepts_dataset import ConceptsDataset
 from pyclad.video.data.sample import VideoBag, VideoWindow
@@ -70,23 +73,13 @@ class CommandUcfCrimeDataset(ConceptsDataset):
             the complete test split is retained.
         """
         if root is None:
-            root = snapshot_download(
-                repo_id=self._hf_repo,
-                repo_type="dataset",
+            root = self._download_root(
                 cache_dir=cache_dir,
                 revision=revision,
                 local_files_only=local_files_only,
-                allow_patterns=[
-                    "all_rgbs/**/*.npy",
-                    "all_flows/**/*.npy",
-                    "train_normal.txt",
-                    "train_anomaly.txt",
-                    "test_normalv2.txt",
-                    "test_anomalyv2.txt",
-                ],
             )
         self.root = Path(root).expanduser().resolve()
-        self._validate_layout()
+        self._validate_layout(self.root)
         self._normal_train = self._read_train_records("train_normal.txt", weak_label=0)
         self._anomaly_train = self._read_train_records("train_anomaly.txt", weak_label=1)
         self._test_records = (*self._read_normal_test_records(), *self._read_anomaly_test_records())
@@ -110,6 +103,34 @@ class CommandUcfCrimeDataset(ConceptsDataset):
         super().__init__(
             name=dataset.name(), train_concepts=dataset.train_concepts(), test_concepts=dataset.test_concepts()
         )
+
+    @classmethod
+    def _download_root(cls, *, cache_dir, revision, local_files_only):
+        """Download one ZIP and atomically cache its extracted, revision-specific layout."""
+        archive = Path(
+            hf_hub_download(
+                repo_id=cls._hf_repo,
+                filename="ucf-crime-rgb-flow.zip",
+                repo_type="dataset",
+                cache_dir=cache_dir,
+                revision=revision,
+                local_files_only=local_files_only,
+            )
+        )
+        # Keep the snapshot path rather than resolving its symlink into the blob store.
+        root = archive.with_suffix("")
+        with FileLock(str(root) + ".extract.lock"):
+            if not root.is_dir():
+                with TemporaryDirectory(prefix=f".{root.name}-", dir=archive.parent) as directory:
+                    temporary = Path(directory).resolve()
+                    with ZipFile(archive) as zipped:
+                        for member in zipped.infolist():
+                            if not (temporary / member.filename).resolve().is_relative_to(temporary):
+                                raise ValueError(f"unsafe archive member: {member.filename!r}")
+                        zipped.extractall(temporary)
+                    cls._validate_layout(temporary)
+                    temporary.rename(root)
+        return root
 
     def read_dataset(self, *, max_videos_per_class=None) -> ConceptsDataset:
         """Compatibility wrapper; the constructor already exposes the concepts."""
@@ -264,14 +285,16 @@ class CommandUcfCrimeDataset(ConceptsDataset):
                 )
         return tuple(records)
 
-    def _validate_layout(self) -> None:
+    @staticmethod
+    def _validate_layout(root: Path) -> None:
+        """Reject incomplete local or extracted feature layouts."""
         required = (
-            self.root / "all_rgbs",
-            self.root / "all_flows",
-            self.root / "train_normal.txt",
-            self.root / "train_anomaly.txt",
-            self.root / "test_normalv2.txt",
-            self.root / "test_anomalyv2.txt",
+            root / "all_rgbs",
+            root / "all_flows",
+            root / "train_normal.txt",
+            root / "train_anomaly.txt",
+            root / "test_normalv2.txt",
+            root / "test_anomalyv2.txt",
         )
         missing = [str(path) for path in required if not path.exists()]
         if missing:
