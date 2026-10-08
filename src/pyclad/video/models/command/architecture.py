@@ -363,12 +363,12 @@ class CommandNetwork(nn.Module):
 class CommandVideoNetwork(nn.Module):
     """Apply COMMAND to a batch of complete RGB/flow video bags."""
 
-    def __init__(self, architecture):
+    def __init__(self, architecture: CommandArchitectureConfig):
         super().__init__()
         self.architecture = architecture
         self.network = CommandNetwork(architecture)
 
-    def forward(self, bags: Tensor, *, track_memory_usage: bool = False):
+    def forward(self, bags: Tensor, *, track_memory_usage: bool = False) -> CommandOutput:
         if bags.ndim != 3 or bags.shape[-1] != self.architecture.fused_dim:
             raise ValueError(f"COMMAND expects (batch, time, {self.architecture.fused_dim}) features")
         split = self.architecture.appearance_dim

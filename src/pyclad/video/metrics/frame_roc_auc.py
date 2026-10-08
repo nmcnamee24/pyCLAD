@@ -11,9 +11,11 @@ class FrameRocAuc(BaseMetric):
 
     def compute(self, anomaly_scores, y_pred, y_true) -> float:
         """Evaluate aligned, flattened frame curves."""
-        if len(y_true) == 0 or len(np.unique(y_true)) < 2:
+        y_score = np.asarray(anomaly_scores).reshape(-1)
+        y_true_flat = np.asarray(y_true).reshape(-1)
+        if len(np.unique(y_true_flat)) < 2:
             return float("nan")
-        return float(roc_auc_score(y_true=y_true, y_score=anomaly_scores))
+        return float(roc_auc_score(y_true=y_true_flat, y_score=y_score))
 
     def name(self) -> str:
         return "Frame-ROC-AUC"

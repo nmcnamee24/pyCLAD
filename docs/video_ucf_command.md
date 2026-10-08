@@ -8,7 +8,7 @@ other pyCLAD modalities.
 ## Package layout
 
 Video follows the same data, model, strategy, callback, and metric organization
-as `pyclad.vision`, using existing folders:
+as `pyclad.vision`:
 
 - `data/command_ucf_crime.py` contains the dataset and archive reader;
   `data/video_bag_concept.py` and `data/sample.py` hold the video data contracts.
@@ -21,9 +21,7 @@ as `pyclad.vision`, using existing folders:
 - `prediction_results.py` holds the modality-specific prediction result.
 
 Import `CommandModel` from `pyclad.video.models.command.command` and its
-configuration classes from `pyclad.video.models.command.config`. The example
-below uses these paths; the former `video.datasets` and COMMAND `model` modules
-have been removed.
+configuration classes from `pyclad.video.models.command.config`.
 
 ## Run the example
 
@@ -31,12 +29,38 @@ From a source checkout:
 
 ```shell
 pip install -e '.[video]'
-python examples/models/video/command_example.py /path/to/UCF-Crime \
-  --epochs 100 --device cuda --output command-results.json
+python examples/models/video/command_example.py
 ```
 
-The example saves frame ROC-AUC/AP matrices and a final model checkpoint.
-It expects this archive layout:
+The example composes the dataset, model, strategy, callbacks, and scenario
+directly, as the vision examples do. Edit their configuration in the script
+to change the run. `CommandUcfCrimeDataset()` downloads the paired feature
+archive when needed and reuses its extracted cache. To read an existing local
+archive without downloading, replace the dataset assignment with:
+
+```python
+dataset = CommandUcfCrimeDataset(root="/path/to/UCF-Crime")
+```
+
+To require a previously downloaded Hugging Face cache, use:
+
+```python
+dataset = CommandUcfCrimeDataset(local_files_only=True)
+```
+
+The script sets 20 epochs per task; `CommandTrainerConfig` defaults to 100.
+It selects CUDA when available, then MPS, then CPU. Edit `epochs` and `device`
+in the script to choose other settings.
+
+Results are written to `output.json` in the working directory, including
+video-level and frame-level ROC-AUC/AP matrices, final-step averages, timing,
+and run metadata. To save a model checkpoint, add this after `scenario.run()`:
+
+```python
+model.save_checkpoint(pathlib.Path("command-results.pt"))
+```
+
+A local archive must have this layout:
 
 ```text
 UCF-Crime/
@@ -51,7 +75,9 @@ UCF-Crime/
 Each stream contains one finite `(32, 1024)` NumPy array per manifest row,
 located at `<stream>/<video-relative-path>.npy`. The reader rejects malformed
 features, unbalanced training manifests, duplicate test videos, and train/test
-overlap. Repeated training paths retain distinct bag identifiers, preserving
+overlap. Anomaly intervals use positive, ordered, one-based inclusive frame
+coordinates; endpoints past the video length are clipped. Repeated training
+paths retain distinct bag identifiers, preserving
 the COMMAND release's 1,620 rows rather than deduplicating its 1,610 videos.
 
 ## Continual workflow
@@ -73,13 +99,22 @@ remain outside the feature tensors. `CommandModel.fit()` performs ContTrain++
 training, retaining optimizer state and complete-bag replay across tasks;
 `ContTrainPlusPlusStrategy` connects it to the core scenario. Prediction
 returns bag maxima plus window scores. `VideoFrameMetricCallback` expands
-those scores to frames and reuses the core metric-matrix reporting. Checkpoints
-are saved explicitly through `model.save_checkpoint(path)`. Load them with
+those scores to frames and reuses the core metric-matrix reporting, rejecting
+predictions that leave any video's frames uncovered. Checkpoints are saved
+explicitly through `model.save_checkpoint(path)`. Load them with
 `model.load_checkpoint(path)` using the same configuration; the destination
 `device` may differ. New checkpoints restore CPU and CUDA random-generator state
 for dropout continuation on the same backend. Loading restores those process-wide
 RNG states; identical results across devices are not guaranteed. Older checkpoints
 remain loadable but cannot restore Torch RNG state that was never saved.
+
+The configured seed controls network initialization and training-bag order.
+As with the vision models, constructing a network seeds the process-wide Torch
+generator. Passing a prebuilt network preserves its existing weights.
+
+The weakly supervised COMMAND objective and replay operate on complete temporal
+bags. Existing tabular strategies such as A-GEM, EWC, and LwF are unchanged;
+they are not adapters for this bag-based model.
 
 The example composes the public classes directly; no video-specific CLI or
 experiment runner is required. Use `JsonOutputWriter` to serialize the model,

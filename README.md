@@ -33,7 +33,7 @@ see [pyOD docs](https://pyod.readthedocs.io/en/latest/).
 
 #### Video anomaly detection
 
-Install `pip install -e '.[video]'` for the UCF-Crime COMMAND recreation.
+From a source checkout, install `pip install -e '.[video]'` for the UCF-Crime COMMAND recreation.
 See the [video guide](docs/video_ucf_command.md) and
 [example](examples/models/video/command_example.py) for the 4/4/5 workflow.
 

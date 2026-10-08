@@ -5,6 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from pyclad.video.metrics.frame_average_precision import FrameAveragePrecision
+from pyclad.video.metrics.frame_roc_auc import FrameRocAuc
+
 
 class TestVideoCore:
 
@@ -17,16 +20,69 @@ class TestVideoCore:
         np.testing.assert_allclose(frame_scores["video"], [0.2, 0.2, 0.5, 0.8, 0.8])
 
     def test_frame_metrics_report_perfect_ranking(self):
-        from pyclad.video.metrics.frame_average_precision import (
-            FrameAveragePrecision,
-        )
-        from pyclad.video.metrics.frame_roc_auc import FrameRocAuc
-
         labels = np.asarray([0, 0, 0, 1])
         scores = np.asarray([0.0, 0.1, 0.2, 0.9])
         for metric in (FrameRocAuc(), FrameAveragePrecision()):
             assert metric.compute(scores, None, labels) == 1.0
             assert np.isnan(metric.compute(scores, None, np.zeros(4)))
+
+    @pytest.mark.parametrize("metric_class, expected", [(FrameRocAuc, 0.75), (FrameAveragePrecision, 5 / 6)])
+    def test_frame_metrics_flatten_temporal_arrays(self, metric_class, expected):
+        labels = [[0, 1], [0, 1]]
+        scores = [[0.1, 0.2], [0.8, 0.9]]
+        metric = metric_class()
+        assert metric.compute(scores, None, labels) == pytest.approx(expected)
+        assert np.isnan(metric.compute(np.empty((2, 0)), None, np.empty((2, 0))))
+
+    @pytest.mark.parametrize("missing", ["window_scores", "windows", "concept", "frame_labels"])
+    def test_frame_callback_skips_predictions_without_frame_evaluation_data(self, missing):
+        from pyclad.data.concept import Concept
+        from pyclad.video.callbacks.video_frame_metric_callback import (
+            VideoFrameMetricCallback,
+        )
+        from pyclad.video.data.sample import VideoWindow
+        from pyclad.video.data.video_bag_concept import VideoBagConcept
+
+        callback = VideoFrameMetricCallback(FrameRocAuc())
+        concept = VideoBagConcept(name="test", data=np.empty(0), frame_labels={"video": np.asarray([0, 1])})
+        prediction = {
+            "y_true": np.asarray([0, 1]),
+            "y_pred": np.asarray([0, 1]),
+            "anomaly_scores": np.asarray([0.1, 0.9]),
+            "window_scores": np.asarray([0.1, 0.9]),
+            "windows": (VideoWindow("video", 0, 0), VideoWindow("video", 1, 1)),
+        }
+        if missing == "concept":
+            concept = Concept(name="test", data=np.empty(0))
+        elif missing == "frame_labels":
+            concept.frame_labels = {}
+        else:
+            prediction.pop(missing)
+        callback.after_training(Concept(name="train", data=np.empty(0)))
+        callback.after_evaluation(evaluated_concept=concept, **prediction)
+        assert callback.info() == {}
+
+    def test_frame_callback_reports_incomplete_matrix_after_a_skipped_evaluation(self):
+        from pyclad.data.concept import Concept
+        from pyclad.video.callbacks.video_frame_metric_callback import (
+            VideoFrameMetricCallback,
+        )
+        from pyclad.video.data.sample import VideoWindow
+        from pyclad.video.data.video_bag_concept import VideoBagConcept
+
+        callback = VideoFrameMetricCallback(FrameRocAuc())
+        concept = VideoBagConcept(name="test", data=np.empty(0), frame_labels={"video": np.asarray([0, 1])})
+        callback.after_training(Concept(name="T1", data=np.empty(0)))
+        callback.after_evaluation(
+            evaluated_concept=concept,
+            window_scores=np.asarray([0.1, 0.9]),
+            windows=(VideoWindow("video", 0, 0), VideoWindow("video", 1, 1)),
+        )
+        assert callback.dense_matrix() == [[1.0]]
+        callback.after_training(Concept(name="T2", data=np.empty(0)))
+        callback.after_evaluation(evaluated_concept=concept)
+        with pytest.raises(ValueError, match="incomplete"):
+            callback.info()
 
     @pytest.mark.parametrize("aggregation", ["mean", "max"])
     @pytest.mark.parametrize("missing", ["frame", "video"])

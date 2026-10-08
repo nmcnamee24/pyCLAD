@@ -4,7 +4,7 @@ import ast
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple, Union
 from zipfile import ZipFile
 
 import numpy as np
@@ -15,28 +15,13 @@ from pyclad.data.datasets.concepts_dataset import ConceptsDataset
 from pyclad.video.data.sample import VideoBag, VideoWindow
 from pyclad.video.data.video_bag_concept import VideoBagConcept
 
-COMMAND_UCF_CRIME_CONCEPT_ORDER = (
-    "Abuse",
-    "Arrest",
-    "Arson",
-    "Assault",
-    "Burglary",
-    "Explosion",
-    "Fighting",
-    "RoadAccidents",
-    "Robbery",
-    "Shooting",
-    "Shoplifting",
-    "Stealing",
-    "Vandalism",
-)
-
 # COMMAND Section IV-C groups the anomaly classes into 4/4/5 tasks.
 COMMAND_UCF_CRIME_PAPER_TASKS = (
     ("Abuse", "Arrest", "Arson", "Assault"),
     ("Burglary", "Explosion", "Fighting", "RoadAccidents"),
     ("Robbery", "Shooting", "Shoplifting", "Stealing", "Vandalism"),
 )
+COMMAND_UCF_CRIME_CONCEPT_ORDER = tuple(category for task in COMMAND_UCF_CRIME_PAPER_TASKS for category in task)
 
 
 @dataclass(frozen=True)
@@ -62,7 +47,15 @@ class CommandUcfCrimeDataset(ConceptsDataset):
 
     _hf_repo = "nmcnamee24/ucf-crime-rgb-flow-features"
 
-    def __init__(self, root=None, *, cache_dir=None, revision=None, local_files_only=False, max_videos_per_class=None):
+    def __init__(
+        self,
+        root: Optional[Union[str, Path]] = None,
+        *,
+        cache_dir: Optional[Union[str, Path]] = None,
+        revision: Optional[str] = None,
+        local_files_only: bool = False,
+        max_videos_per_class: Optional[int] = None,
+    ):
         """
         :param root: Existing archive directory. If omitted, download from Hugging Face.
             An explicit local path never triggers a download.
@@ -105,7 +98,13 @@ class CommandUcfCrimeDataset(ConceptsDataset):
         )
 
     @classmethod
-    def _download_root(cls, *, cache_dir, revision, local_files_only):
+    def _download_root(
+        cls,
+        *,
+        cache_dir: Optional[Union[str, Path]],
+        revision: Optional[str],
+        local_files_only: bool,
+    ) -> Path:
         """Download one ZIP and atomically cache its extracted, revision-specific layout."""
         archive = Path(
             hf_hub_download(
@@ -132,13 +131,13 @@ class CommandUcfCrimeDataset(ConceptsDataset):
                     temporary.rename(root)
         return root
 
-    def read_dataset(self, *, max_videos_per_class=None) -> ConceptsDataset:
+    def read_dataset(self, *, max_videos_per_class: Optional[int] = None) -> ConceptsDataset:
         """Compatibility wrapper; the constructor already exposes the concepts."""
         if max_videos_per_class is None:
             return self
         return self._read_dataset(max_videos_per_class=max_videos_per_class)
 
-    def _read_dataset(self, *, max_videos_per_class=None) -> ConceptsDataset:
+    def _read_dataset(self, *, max_videos_per_class: Optional[int] = None) -> ConceptsDataset:
         """Materialize T1/T2/T3 with disjoint normal shards and a fixed test split.
 
         An optional positive per-class limit supports small smoke runs. It is
@@ -164,7 +163,7 @@ class CommandUcfCrimeDataset(ConceptsDataset):
         test = self._concept("test", self._test_records, training=False)
         return ConceptsDataset("COMMAND-UCF-Crime", train, [test])
 
-    def _concept(self, name, records, *, training):
+    def _concept(self, name: str, records: Sequence[CommandUcfCrimeRecord], *, training: bool) -> VideoBagConcept:
         bags = []
         frame_labels = {}
         for record in records:
@@ -193,8 +192,8 @@ class CommandUcfCrimeDataset(ConceptsDataset):
             frame_labels=frame_labels,
         )
 
+    @staticmethod
     def _frame_ranges(
-        self,
         record: CommandUcfCrimeRecord,
         window_count: int,
     ) -> Tuple[Tuple[int, int], ...]:

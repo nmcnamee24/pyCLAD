@@ -290,7 +290,7 @@ class CommandModel(Model):
         )
 
     @staticmethod
-    def _bags(data):
+    def _bags(data: np.ndarray) -> tuple[VideoBag, ...]:
         values = np.asarray(data, dtype=object)
         if values.ndim != 1 or any(not isinstance(bag, VideoBag) for bag in values):
             raise ValueError("COMMAND requires a one-dimensional array of VideoBag objects")
@@ -299,7 +299,7 @@ class CommandModel(Model):
     def name(self) -> str:
         return "COMMAND"
 
-    def _optimizer(self):
+    def _optimizer(self) -> torch.optim.Optimizer:
         secondary = []
         primary = []
         for name, parameter in self.model.named_parameters():

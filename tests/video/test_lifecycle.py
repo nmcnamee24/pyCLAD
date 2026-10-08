@@ -91,7 +91,7 @@ def test_three_tasks_use_core_model_scenario_metrics_and_writer(archive):
         np.testing.assert_array_equal(prediction.window_scores, restored.predict(test_data).window_scores)
 
 
-def test_example_runs_core_callbacks_and_writes_summaries_and_checkpoint(archive, monkeypatch):
+def test_example_runs_core_callbacks_and_writes_summaries(archive, monkeypatch):
     """Execute the example with real training and output, substituting only the data source and run size."""
     import runpy
     import sys
@@ -125,7 +125,7 @@ def test_example_runs_core_callbacks_and_writes_summaries_and_checkpoint(archive
     monkeypatch.chdir(archive)
     runpy.run_path(str(example), run_name="__main__")
 
-    saved = json.loads((archive / "command-results.json").read_text())
+    saved = json.loads((archive / "output.json").read_text())
     for metric in ("ROC-AUC", "AP", "Frame-ROC-AUC", "Frame-AP"):
         payload = saved[f"concept_metric_callback_{metric}"]
         assert payload["concepts_order"] == ["T1", "T2", "T3"]
@@ -136,9 +136,8 @@ def test_example_runs_core_callbacks_and_writes_summaries_and_checkpoint(archive
     timing = saved["time_evaluation_callback"]
     assert timing["train_time_total"] > 0 and timing["eval_time_total"] > 0
     assert all(timing["time_by_concept"][task]["train_time"] > 0 for task in ("T1", "T2", "T3"))
-    state = torch.load(archive / "command-results.pt", map_location="cpu", weights_only=False)
-    assert state["global_epoch"] == 3
-    assert len(state["replay"]["entries"]) == 6
+    assert saved["model"]["global_epochs"] == 3
+    assert saved["model"]["buffer_bags"] == 6
 
 
 def test_duplicate_training_rows_keep_distinct_bags(archive):
